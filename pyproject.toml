@@ -1,0 +1,50 @@
+[project]
+name = "convtasnet"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.13"
+
+
+dependencies = [
+    "hatorch",
+    "onnx>=1.21.0",
+    "onnxscript>=0.6.2",
+    "pandas>=3.0.1",
+    "pystoi>=0.4.1",
+    "pytorch-lightning>=2.6.1",
+    "pyyaml>=6.0.3",
+    "requests>=2.33.0",
+    "scipy>=1.17.1",
+    "setuptools==80.8.0",
+    "soundfile>=0.13.1",
+    "tensorboard>=2.20.0",
+    "torch==2.10",
+    "torchaudio==2.10",
+]
+
+[dependency-groups]
+dev = ["ruff>=0.15.4", "ty>=0.0.20"]
+
+[tool.ty.environment]
+root = ["./src"]
+
+[tool.ty.src]
+exclude = ["src/LibriMix.py"]
+
+[tool.uv.workspace]
+members = ["hatorch"]
+
+[tool.uv.sources]
+hatorch = { workspace = true }
+
+[tool.ruff]
+exclude = ["hatorch", "src/LibriMix.py", "src/ConvTasNetArticle"]
+
+[tool.ruff.lint]
+select = ["I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+pythonpath = ["src"]

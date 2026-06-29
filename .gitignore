@@ -1,0 +1,16 @@
+.DS_Store
+__pycache__
+MiniLibriMix
+.venv
+OAR.*
+convtasnet.onnx
+audio
+*.onnx
+*.onnx.data
+onnxruntime_profile__*.json
+
+custom_audios/*
+!custom_audios/.gitkeep
+
+exp
+!exp/.gitkeep
