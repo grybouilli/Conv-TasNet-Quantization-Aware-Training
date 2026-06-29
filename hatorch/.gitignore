@@ -1,0 +1,41 @@
+### Python ###
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# direnv
+.envrc
+.direnv/
+
+# pycharm
+.idea/
+
+# Nix
+result
+
+# Cache
+data/
+checkpoints/
+
+# Build
+dist/
+
+*.pdf
+
+# Examples
+examples_log/
+*.csv
+tests/test_trainer
+
+# PyTorch binary
+*.pth
+*.pt
+events.out.tfevents.*
+*.pkl
+
+# Test trainer
+test_trainer/
+/.~lock.baseline.ods#
+/baseline.ods
+/benchmark

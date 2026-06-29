@@ -1,0 +1,2 @@
+src/hatorch/weights/vgg/vggbn11_cifar100.wgt filter=lfs diff=lfs merge=lfs -text
+src/hatorch/weights/vgg/vggbn11_cifar10.wgt filter=lfs diff=lfs merge=lfs -text
