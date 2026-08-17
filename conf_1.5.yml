@@ -26,7 +26,7 @@ masknet:
 
 # Training config
 training:
-  epochs: 100
+  epochs: 200
   batch_size: 6
   num_workers: 9
   half_lr: yes
@@ -34,10 +34,6 @@ training:
   # TODO: try with false?
   early_stop: yes
   seed: 0
-# Quantization Aware Training config
-quantize:
-  epochs: 30
-  quantize_config_name: encdec_S16S16_tcn_S8S8
 # Optim config
 optim:
   # We use Adam
@@ -53,8 +49,9 @@ data:
   # 4s segments
   segment: 3
   metadata_dir: /srv/storage/emeraude@storage1.lyon.grid5000.fr/adidierj/data/LibriMix/Libri2Mix/wav8k/min/metadata/
+
 quantize:
-  quantize_config_name: all_S8S8
   epochs: 30
 
-exp_dir: ./exp/ConvTasNet_0.001
+#exp_dir: ./exp/ExpMemory
+exp_dir: ./exp/ConvTasNet_1.5
