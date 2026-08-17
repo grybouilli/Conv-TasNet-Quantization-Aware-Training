@@ -1,3 +1,22 @@
+"""
+Quantization Aware Training (QAT) of a trained ConvTasNet model using HATorch.
+
+Usage:
+    python src/quantize.py <model_architecture> <quantization_config>
+
+Arguments:
+    model_architecture:
+        Model architecture identifier (e.g. ``0.5``, ``1.5``).
+
+    quantization_config:
+        Name of the quantization configuration to apply (e.g. ``all_S8S8``, ``all_S16S16``...).
+
+The number of QAT epochs is defined in the configuration file (conf_<model_architecture>.yml) under the key ``quantize.epochs``. The default value is 30.
+
+Examples:
+    python src/quantize.py 0.5 all_S8S8
+"""
+
 import os
 import sys
 from datetime import datetime
@@ -15,7 +34,7 @@ from torchmetrics.audio import PermutationInvariantTraining
 from utils.conf import Conf
 from utils.lightning_module import ConvTasNetLightningModule
 from utils.utils import get_data_loaders, load_trained_model, neg_sisdr
-from utils.utils_quantize import quantize_model
+from utils.utils_quantize import quantize_model, validate_quantization_config_names
 
 accelerator = "gpu"
 devices = "auto"
@@ -23,36 +42,38 @@ strategy = "auto"
 
 strategy = "ddp_find_unused_parameters_true"
 
-# CONF_PATH = "exp/ConvTasNet_0.001/conf.yml"
-CONF_PATH = "conf.yml"
 
 CHECKPOINT_FILENAME: str | None = None
 # CHECKPOINT_FILENAME = "epoch=2-step=3174.ckpt"
 
 
-def train(conf: Conf):
+def train(conf: Conf, model_archi: str, quantization_config_name: str):
 
     if conf.training.seed:
         print(f"Setting seed to {conf.training.seed}")
         torch.manual_seed(conf.training.seed)
 
-    quantization_config_name = conf.quantize.quantize_config_name
-
-    if quantization_config_name == "all_S16S16":
-        CHECKPOINT_FILENAME = "epoch=12-step=13754.ckpt"
-    elif quantization_config_name == "encdec_S16S16_tcn_S8S8":
-        CHECKPOINT_FILENAME = "epoch=26-step=28566.ckpt"
+    if False:
+        pass
+    # elif quantization_config_name == "all_S8S8":
+    #     CHECKPOINT_FILENAME = "epoch=49-step=52900.ckpt"
+    # elif quantization_config_name == "all_S16S16":
+    #     CHECKPOINT_FILENAME = "epoch=24-step=26450.ckpt"
+    # elif quantization_config_name == "encdec_S16S16_tcn_S8S8":
+    #     CHECKPOINT_FILENAME = "epoch=26-step=28566.ckpt"
+    # elif quantization_config_name == "encdec_S16S16_tcn_S4S4":
+    #     CHECKPOINT_FILENAME = "epoch=56-step=60306.ckpt"
     else:
         CHECKPOINT_FILENAME = None
 
-    print("Starting from checkpoint:", CHECKPOINT_FILENAME)
-
-    # model: ConvTasNet = construct_model(conf=conf)
+    if CHECKPOINT_FILENAME is not None:
+        print(f"Using checkpoint: {CHECKPOINT_FILENAME}")
 
     # Note: we should not compile the model prior to quantization
     # pytorch lightning will compile the model
     model = load_trained_model(conf=conf, eval=False, compile=False)
 
+    # The quantized model will be saved in a new directory: ConvTasNet_<quantization_config_name>/
     exp_dir = conf.exp_dir
     if exp_dir[-1] == "/":
         exp_dir = exp_dir[:-1]
@@ -74,6 +95,11 @@ def train(conf: Conf):
     quantized_model = quantize_model(
         model,
         config_name=quantization_config_name,
+        example_args=(
+            torch.rand(
+                conf.training.batch_size, conf.data.sample_rate * conf.data.segment
+            ),
+        ),
     )
 
     transforms_utils.print_quantization_summary(quantized_model)
@@ -145,7 +171,7 @@ def train(conf: Conf):
             module,
             train_dataloaders=train_loader,
             val_dataloaders=val_loader,
-            ckpt_path=f"/home/adidierj/emeraude-gs/convtasnet/exp/ConvTasNet_0.001_{quantization_config_name}/checkpoints/{CHECKPOINT_FILENAME}",
+            ckpt_path=f"{conf.exp_dir}checkpoints/{CHECKPOINT_FILENAME}",
         )
     else:
         trainer.fit(
@@ -167,13 +193,25 @@ def train(conf: Conf):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print(__doc__)
+        sys.exit(1)
+
+    model_archi = sys.argv[1]
+    print(f"Using model architecture: {model_archi}")
+
+    quantize_config_name = sys.argv[2]
+    validate_quantization_config_names([quantize_config_name])
+    print(f"Using quantization config: {quantize_config_name}")
+
+    CONF_PATH = f"conf_{model_archi}.yml"
     with open(CONF_PATH) as f:
         conf_data = yaml.safe_load(f)
 
     conf = Conf(conf_data)
 
-    if len(sys.argv) > 1:
-        conf.quantize.quantize_config_name = sys.argv[1]
-        print(f"Using quantization config: {conf.quantize.quantize_config_name}")
-
-    train(conf=conf)
+    train(
+        conf=conf,
+        model_archi=model_archi,
+        quantization_config_name=quantize_config_name,
+    )

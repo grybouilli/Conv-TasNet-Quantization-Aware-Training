@@ -16,8 +16,8 @@ from hatorch.transforms.config import (
 )
 from hatorch.transforms.utils import quantize_model
 
-from norm import GlobalLayerNorm
-from norm_quantized import QuantGlobalLayerNorm
+from model.norm import GlobalLayerNorm
+from model.norm_quantized import QuantGlobalLayerNorm
 
 
 class Model(nn.Module):

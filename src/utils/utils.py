@@ -1,6 +1,7 @@
 import os
 
 import torch
+from hatorch.modules.quantize_wrapper import QuantizeWrapper
 from hatorch.transforms import utils as transforms_utils
 from torch.utils.data import DataLoader
 from torchmetrics.functional.audio import (
@@ -142,23 +143,21 @@ def load_trained_model(
     compile: bool = False,
     strict_load_state_dict: bool = True,
     config_name: str | None = None,
-    quantize_based_on_config: bool = False,
-) -> ConvTasNet:
+) -> ConvTasNet | QuantizeWrapper[ConvTasNet]:
     exp_dir = conf.exp_dir
     trained_model = os.path.join(exp_dir, "compiled_model.pth")
 
     model: ConvTasNet = construct_model(conf=conf)
     # model = quantize_model(model)
 
-    if quantize_based_on_config:
-        if conf.training.quantize_config_name is None:
-            raise ValueError(
-                "quantize_config_name must be specified in the training config."
-            )
-        config_name = conf.training.quantize_config_name
+    example_args = (
+        torch.rand(conf.training.batch_size, conf.data.sample_rate * conf.data.segment),
+    )  # Example input for tracing
 
     if config_name is not None:
-        model = quantize_model(model, config_name=config_name)
+        model = quantize_model(
+            model, config_name=config_name, example_args=example_args
+        )
 
         transforms_utils.print_quantization_summary(
             model,

@@ -1,4 +1,19 @@
+"""
+Train a ConvTasNet model with the specified architecture and quantization configuration.
+
+Usage:
+    python src/train.py <model_architecture>
+
+Arguments:
+    model_architecture:
+        Model architecture identifier (e.g. ``0.5``, ``1.5``).
+
+Examples:
+    python src/train.py 0.5
+"""
+
 import os
+import sys
 
 import pytorch_lightning as pl
 import torch
@@ -80,7 +95,7 @@ def train(conf: Conf):
         # TODO: change to train the full model
         # limit_train_batches = 100,
         # limit_val_batches=100,
-        limit_train_batches=1.0,  # Useful for fast experiment
+        # limit_train_batches=1.0,  # Useful for fast experiment
         gradient_clip_val=5.0,
         # It may slow down training to log on every single batch. By default, Lightning logs every 50 rows, or 50 training steps
         # log_every_n_steps=2,
@@ -98,7 +113,15 @@ def train(conf: Conf):
 
 
 if __name__ == "__main__":
-    with open("conf.yml") as f:
+    if len(sys.argv) != 2:
+        print(__doc__)
+        sys.exit(1)
+
+    model_archi = sys.argv[1]
+    print(f"Using model architecture: {model_archi}")
+
+    CONF_PATH = f"conf_{model_archi}.yml"
+    with open(CONF_PATH) as f:
         conf_data = yaml.safe_load(f)
 
     conf = Conf(conf_data)

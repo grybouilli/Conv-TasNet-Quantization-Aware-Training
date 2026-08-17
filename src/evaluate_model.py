@@ -1,4 +1,22 @@
+"""
+Evaluate a trained model on the test set. We compute the average SDR, SI-SDR, and STOI metrics over the test set and save the result to a yaml file.
+
+Usage:
+    python src/evaluate_model.py <model_archi> <quantization_config> ... <quantization config>
+
+Arguments:
+    model_architecture:
+        Model architecture identifier (e.g. ``0.5``, ``1.5``).
+
+    quantization_config:
+        Name of the quantization configuration to apply (e.g. ``all_S8S8``, ``all_S16S16``...).
+
+Examples:
+    python src/evaluate_model.py 0.5 full_precision all_S8S8 all_S16S16
+"""
+
 import os
+import sys
 
 import soundfile as sf
 import torch
@@ -19,6 +37,7 @@ from utils.utils import (
     load_trained_model,
     rms_normalize,
 )
+from utils.utils_quantize import validate_quantization_config_names
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
@@ -49,18 +68,11 @@ def evaluate(
 
     audios = {}
 
-    # Warmup
-    # with torch.no_grad():
-    #     input = next(iter(test_set))[0].unsqueeze(1).to(device)  # [batch, channel, time]
-    #     print(f"Warmup input shape: {input.shape}")
-    #     for _ in range(2):
-    #         _ = model(input)
-
     for i, batch in enumerate(test_set):
         input, targets = batch
-        input = input.unsqueeze(1).to(device)
+        input = input.to(device)
 
-        targets = targets.to(device)  # .unsqueeze(0)  # Add batch dimension to targets
+        targets = targets.to(device)  # Add batch dimension to targets
 
         print(f"Batch {i} - Input shape: {input.shape}, Targets shape: {targets.shape}")
         # Compute estimated targets
@@ -71,13 +83,13 @@ def evaluate(
 
                 start.record()
 
-            est_targets = model(input)  # .unsqueeze(0)
+            est_targets = model(input)
 
             if device == "cuda":
                 end.record()
                 torch.cuda.synchronize()  # Wait for the events to be recorded
 
-        targets = targets.to(device)  # .unsqueeze(0)  # Add batch dimension to targets
+        targets = targets.to(device)  # Add batch dimension to targets
         print(f"Batch {i} - Estimated targets shape: {est_targets.shape}")
 
         if device == "cuda":
@@ -134,15 +146,24 @@ def evaluate(
     return results, audios
 
 
-CONF_PATH = f"exp/ConvTasNet_0.001/conf.yml"
-
-# TODO: max
 export_batches_index = torch.randint(0, nb_batches_to_evaluate or 23, (4,)).tolist()
 export_batches_index.append(0)  # Ensure the first batch is exported
 print(f"Exporting batches with indices: {export_batches_index}")
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+
+    model_archi = sys.argv[1]
+    print(f"Using model architecture: {model_archi}")
+
+    configs_names = sys.argv[2:]
+    validate_quantization_config_names(configs_names, accept_full_precision=True)
+    print(f"Using quantization configs: {configs_names}")
+
+    CONF_PATH = f"conf_{model_archi}.yml"
     with open(CONF_PATH) as f:
         conf_data = yaml.safe_load(f)
 
@@ -157,15 +178,11 @@ if __name__ == "__main__":
     # )
     # test_set = val_loader
 
-    configs_names = [
-        "encdec_S16S16_tcn_S8S8"
-    ]  # ["full_precision", "all_S8S8", "all_S4S4", "all_S16S16"]
-
     for config_name in configs_names:
         print(f"Evaluating configuration: {config_name}")
         config_conf: Conf
         if config_name == "full_precision":
-            conf_path = f"exp/ConvTasNet_0.001/conf.yml"
+            conf_path = f"exp/ConvTasNet_{model_archi}/conf.yml"
             with open(conf_path) as f:
                 conf_data = yaml.safe_load(f)
 
@@ -173,7 +190,7 @@ if __name__ == "__main__":
             model = load_trained_model(conf=config_conf, eval=True, compile=True)
 
         else:
-            conf_path = f"exp/ConvTasNet_0.001_{config_name}/conf.yml"
+            conf_path = f"exp/ConvTasNet_{model_archi}_{config_name}/conf.yml"
             with open(conf_path) as f:
                 conf_data = yaml.safe_load(f)
 
@@ -192,7 +209,8 @@ if __name__ == "__main__":
         results, audios = evaluate(test_set, nb_batches_to_evaluate, model)
 
         for i in audios.keys():
-            input = audios[i]["input"][0, 0, :]
+            print(audios[i]["input"].shape)
+            input = audios[i]["input"][0, :]
             target_1 = audios[i]["targets"][0, 0, :]
             target_2 = audios[i]["targets"][0, 1, :]
             est_target_1 = audios[i]["est_targets"][0, 0, :]
@@ -248,3 +266,5 @@ if __name__ == "__main__":
                 results,
                 f,
             )
+
+        print(f"Evaluation results saved to {path}")

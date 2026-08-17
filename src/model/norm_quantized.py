@@ -86,10 +86,10 @@ class QuantGlobalLayerNorm(HatorchQuantizedLayer[GlobalLayerNorm]):
         beta = self.beta_weight_quantizer.onnx_export_forward(self.beta)
 
         # We use global_layer_norm_using_torch_layer_norm to export a LayerNorm node in the ONNX graph, which can be optimized by ONNX Runtime
-        # output = global_layer_norm(quant_input_qt, self.gamma, self.beta, self.eps)
-        output = global_layer_norm_using_torch_layer_norm(
-            quant_input_qt, gamma, beta, self.channel_size, self.eps
-        )
+        output = global_layer_norm(quant_input_qt, self.gamma, self.beta, self.eps)
+        # output = global_layer_norm_using_torch_layer_norm(
+        #     quant_input_qt, gamma, beta, self.channel_size, self.eps
+        # )
 
         return output
 

@@ -9,6 +9,7 @@ requires-python = ">=3.13"
 dependencies = [
     "hatorch",
     "onnx>=1.21.0",
+    "onnxruntime>=1.27.0",
     "onnxscript>=0.6.2",
     "pandas>=3.0.1",
     "pystoi>=0.4.1",
@@ -24,7 +25,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["ruff>=0.15.4", "ty>=0.0.20"]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.4",
+    "ty>=0.0.20",
+]
 
 [tool.ty.environment]
 root = ["./src"]
@@ -33,10 +38,12 @@ root = ["./src"]
 exclude = ["src/LibriMix.py"]
 
 [tool.uv.workspace]
-members = ["hatorch"]
+members = [
+    "hatorch",
+]
 
 [tool.uv.sources]
-hatorch = { workspace = true }
+hatorch = { workspace = true}
 
 [tool.ruff]
 exclude = ["hatorch", "src/LibriMix.py", "src/ConvTasNetArticle"]

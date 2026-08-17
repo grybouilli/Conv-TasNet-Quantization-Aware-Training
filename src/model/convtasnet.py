@@ -74,13 +74,13 @@ class Encoder(nn.Module):
         # Conv1d will otherwise add a channel dimension at the beginning, which is not what we want
         # as the first dimension is the batch dimension.
 
-        if input.dim() not in [2, 3]:
-            raise RuntimeError(
-                f"Input should have dimensions 2 or 3 (shape [Batch, L] or [Batch, 1, L]). Received shape: {input.shape}",
-            )
+        # if input.dim() not in [2, 3]:
+        #     raise RuntimeError(
+        #         f"Input should have dimensions 2 or 3 (shape [Batch, L] or [Batch, 1, L]). Received shape: {input.shape}",
+        #     )
 
-        if input.dim() == 2:
-            input = input.unsqueeze(1)
+        # if input.dim() == 2:
+        #     input = input.unsqueeze(1)
 
         return self.conv1d(input)
 
@@ -311,6 +311,8 @@ class TCN(nn.Module):
             kernel_size=1,
         )
 
+        self.receptive_field = 0
+
         self.layers: nn.ModuleList[ConvolutionalBlock1D] = nn.ModuleList(modules=[])
         for r in range(nb_layers):
             for m in range(nb_conv_blocks_per_layer):
@@ -329,6 +331,15 @@ class TCN(nn.Module):
 
                 self.layers.append(conv_block)
 
+                if r == 0 and m == 0:
+                    self.receptive_field += kernel_size
+                else:
+                    # We only implement dilated layers
+                    # if self.dilated:
+                    self.receptive_field += (kernel_size - 1) * 2**m
+                    # else:
+                    #     self.receptive_field += kernel_size - 1
+
         self.non_linearity_out = nn.PReLU()
         self.conv1d_out = nn.Conv1d(
             in_channels=skip_dim,
@@ -343,7 +354,7 @@ class TCN(nn.Module):
         batch_size, _, length_L = input.size()
         # input shape: [Batch, N, L]
         normed_input = self.layer_norm(input)
-        assert normed_input.shape == input.shape
+        # assert normed_input.shape == input.shape
         # normed_input shape: [Batch, N, L]
         bn_input = self.bottleneck_layer(normed_input)
         # bn_input shape: [Batch, B, L]
@@ -462,16 +473,23 @@ class ConvTasNet(nn.Module):
             stride=self.stride,
         )
 
+    @property
+    def receptive_field(self) -> int:
+        """
+        Returns the receptive field of the TCN in number of samples
+        """
+        return self.tcn.receptive_field
+
     def pad_signal(self, input):
         # From Paper implementation
 
         # input is the waveforms: (B, T) or (B, 1, T)
         # reshape and padding
-        if input.dim() not in [2, 3]:
-            raise RuntimeError("Input can only be 2 or 3 dimensional.")
+        # if input.dim() not in [2, 3]:
+        #     raise RuntimeError("Input can only be 2 or 3 dimensional.")
 
-        if input.dim() == 2:
-            input = input.unsqueeze(1)
+        # if input.dim() == 2:
+        input = input.unsqueeze(1)
 
         nsample = input.size(2)
         rest = (
@@ -479,8 +497,8 @@ class ConvTasNet(nn.Module):
             - (self.stride + nsample % self.encoder_kernel_size)
             % self.encoder_kernel_size
         )
-        if rest > 0:
-            input = F.pad(input, (0, rest))
+        # if rest > 0:
+        input = F.pad(input, (0, rest))
 
         input = F.pad(input, (self.stride, self.stride))
 

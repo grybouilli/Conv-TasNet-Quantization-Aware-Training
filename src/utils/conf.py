@@ -34,7 +34,6 @@ class TrainingConf:
 @dataclass
 class QuantizeConf:
     epochs: int
-    quantize_config_name: str
 
 
 @dataclass
@@ -78,7 +77,8 @@ class Conf:
             norm_type=NormType(data["masknet"]["norm_type"]),
         )
         self.training = TrainingConf(**data["training"])
-        self.quantize = QuantizeConf(**data["quantize"])
+        if "quantize" in data:
+            self.quantize = QuantizeConf(**data["quantize"])
         self.optim = OptimConf(**data["optim"])
         self.data = DataConf(**data["data"])
         self.exp_dir: str = data["exp_dir"]
