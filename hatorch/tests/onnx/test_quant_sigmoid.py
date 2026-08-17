@@ -119,6 +119,10 @@ def test_quant_conv1d(
     print("Output ONNX:", outputs[0].shape)
     print(outputs[0])
 
+    # Relative difference between the two outputs
+    relative_diff = torch.abs(outputs_hatorch - torch.from_numpy(outputs[0])) / (torch.abs(outputs_hatorch) + 1e-8)
+    print(f"Relative difference between hatorch and onnx inference: {relative_diff.mean()}")
+
     torch.testing.assert_close(
         outputs_hatorch, torch.from_numpy(outputs[0]), atol=atol, rtol=rtol
     )

@@ -67,7 +67,6 @@ class LsqUniformQuantizer(BaseLearnedQuantizer):
             if not self.is_activation:
                 effective_level_count = 2 ** (self.bit_width - 1)
                 init_scale = torch.max(abs(mean_v - 3 * std_v), abs(mean_v + 3 * std_v)) / effective_level_count
-                init_scale = init_scale.clamp_min(1e-8)
             else:
                 init_scale = (max_v - min_v) / (self.qp - self.qn)
                 if not self.symmetric:
@@ -158,19 +157,21 @@ class LsqUniformQuantizer(BaseLearnedQuantizer):
 
         # For per-tensor quantization, y_scale must be a scalar, otherwise it must be a 1-D tensor, with the length of the quantization axis
         # See https://onnx.ai/onnx/operators/onnx__QuantizeLinear.html#quantizelinear-23
+        raw_scale = self.current_scale()
         if self.per_channel:
-            scale = self.scale.reshape(self.num_channels)
+            scale = raw_scale.reshape(self.num_channels)
             channels_axis = self.channels_axis
         else:
-            assert self.scale.numel() == 1, "Expected single scale value for per-tensor quantization."
+            assert raw_scale.numel() == 1, "Expected single scale value for per-tensor quantization."
             # We reshape it to ensure it will be traited as a scalar in ONNX export
-            scale = self.scale.reshape(())
+            scale = raw_scale.reshape(())
             channels_axis = 1
         # If scale is a scalar, the `axis` attribute will be ignored
 
         # We need to compute the scale and zero point for ONNX conventions: s_onnx = s_hatorch, z_onnx = - z_hatorch / s_hatorch
-        zero_point = None
-        if not self.symmetric:
+        if self.symmetric:
+            zero_point = torch.zeros_like(scale)
+        else:
             zero_point = - self.zero_point / scale
         
         output_dtype = get_output_dtype(self.signed, self.bit_width)

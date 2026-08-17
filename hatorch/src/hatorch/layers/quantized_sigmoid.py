@@ -42,7 +42,9 @@ class QuantSigmoid(HatorchQuantizedLayer[nn.Sigmoid]):
         )
 
     def forward_onnx(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(x)
+        quant_input_qt = self.activation_quantizer.onnx_export_forward(x)
+
+        return torch.sigmoid(quant_input_qt)
 
     @classmethod
     def from_non_quantized_layer(

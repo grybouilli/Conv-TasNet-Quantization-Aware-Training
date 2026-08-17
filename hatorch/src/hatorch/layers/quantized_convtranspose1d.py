@@ -211,7 +211,7 @@ class QuantConvTranspose1d(HatorchQuantizedLayer[nn.ConvTranspose1d]):
         if layer_config.weight_quantizer is not None:
             # Note: we should compute the scale over the axis 1 instead of 0
             weight_quantizer = layer_config.weight_quantizer.create_quantizer(
-                layer.in_channels, channels_axis=0, input_dim=3
+                layer.out_channels // layer.groups, channels_axis=1, input_dim=3
             )
 
         activation_quantizer = None

@@ -58,7 +58,7 @@ def _quantize_dequantize_fake(
 def onnx_quantize_dequantize(
     x: FLOAT,
     scale: FLOAT,
-    zero_point: FLOAT | None,
+    zero_point: FLOAT,
     axis: int = 1,
     output_dtype: int = int(TensorProto.INT8),
 ) -> FLOAT:
@@ -80,16 +80,14 @@ def onnx_quantize_dequantize(
         },
     )
     ```
+
+    zero_point can not be None, in order to be able to cast it to the output_dtype. For symmetric quantization, it should be a tensor of zeros of the same shape as scale.
     """
 
-    if zero_point is not None:
-        # Should we use a op.Constant(value_ints=
-        casted_zero_point = op.Cast(
-            zero_point,
-            to=output_dtype,
-        )
-    else:
-        casted_zero_point = None
+    casted_zero_point = op.Cast(
+        zero_point,
+        to=output_dtype,
+    )
 
     q = op.QuantizeLinear(
         x,

@@ -119,8 +119,8 @@ class QuantTensor:
         output = self.value
         if self.scale is not None:
             output = output * self.scale
-        # if self.zero_point is not None:
-        #     output = output + self.zero_point
+        if self.zero_point is not None:
+            output = output + self.zero_point
         return output
 
     @classmethod

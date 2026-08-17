@@ -8,7 +8,10 @@ from typing_extensions import override
 
 from hatorch.modules.quantized_tensor import QuantTensor
 from hatorch.quantizers.base import BaseQuantizer
+import torch.nn.functional as F
 
+def inv_softplus(x):
+    return x + torch.log(-torch.expm1(-x))
 
 class BaseLearnedQuantizer(BaseQuantizer):
     def __init__(
@@ -73,6 +76,8 @@ class BaseLearnedQuantizer(BaseQuantizer):
             self.scale_and_zero_point_shape = (1,)
 
         initial_scale = torch.ones(self.scale_and_zero_point_shape)
+        # The scale parameter contains the inverse softplus of the actual scale value
+        # Use `current_scale()` to get the effective scale value, which is always positive
         self.scale = nn.Parameter(initial_scale)
         self.scale.requires_grad_(self._scale_trainable)
 
@@ -87,10 +92,14 @@ class BaseLearnedQuantizer(BaseQuantizer):
         self.register_buffer("_scale_initialized", torch.tensor(False, dtype=torch.bool))
 
     def current_scale(self) -> Tensor:
-        return self.scale
+        """
+        The effective scale should always be positive. We use softplus to ensure this positivity.
+        """     
+        return F.softplus(self.scale)
 
     def _set_positive_scale(self, scale_value: Tensor) -> None:
-        stored = scale_value.clamp_min(1e-8)
+        # We store the invert softplus of the scale value we want to use
+        stored = inv_softplus(scale_value)
         self.scale.data.copy_(stored.to(self.scale.device, dtype=self.scale.dtype))
         self._scale_initialized.fill_(True)
         self.is_initialized.fill_(True)

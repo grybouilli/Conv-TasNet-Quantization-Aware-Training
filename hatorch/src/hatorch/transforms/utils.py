@@ -27,10 +27,17 @@ from hatorch.modules.dequantize import Dequantize
 from hatorch.transforms.config import LayerQuantConfig, ModelQuantConfig, QuantizerSpec
 from hatorch.quantizers.base import BaseQuantizer
 from hatorch.modules.quantize_wrapper import QuantizeWrapper
-from hatorch.modules.hatorch_quantized_layer import HatorchQuantizedLayer
+from hatorch.modules.hatorch_quantized_layer import HatorchQuantizedLayer, HatorchQuantizedOperator
 from hatorch.quantizers.common._common_quantizer import BaseLearnedQuantizer
 from hatorch.quantizers.common.scale_approximation import ScaleApproximation
 from hatorch.quantizers.init.lsq_uniform import LsqUniformQuantizer
+
+from hatorch.operators.quantized_add import QuantAdd
+from hatorch.operators.quantized_mul import QuantMul
+
+import operator
+from torch.fx.passes.shape_prop import ShapeProp
+
 
 HATORCH_QUANTIZED_LAYERS_CLASS = [QuantConv2d, QuantConv1d, QuantConvTranspose1d, QuantPReLU, QuantSigmoid]
 
@@ -41,7 +48,9 @@ def quantize_model(
     inplace: bool = False,
     add_quantize: bool = True,
     add_dequantize: bool = True,
+    example_args: Optional[tuple[torch.Tensor]] = None,
     use_wrapper: bool = False,
+    replace_quantizable_operators_using_tracing: bool = False,
     additional_hatorch_quantized_layers_class: list[HatorchQuantizedLayer] | None = None,
 ) -> QuantizeWrapper:
     """
@@ -53,15 +62,25 @@ def quantize_model(
         inplace: Whether to modify the model in-place (default: False)
         add_quantize: Whether to add a Quantize layer at the beginning (default: True)
         add_dequantize: Whether to add a Dequantize layer at the end (default: True)
-        
+        use_wrapper: Whether to wrap the entire model in a QuantizeWrapper (default: False)
+        replace_quantizable_operators_using_tracing: Whether to replace quantizable operators using tracing (addition, multiplication...) (default: False)
+
     Returns:
         Quantized model
     """
     if not inplace:
         import copy
         model = copy.deepcopy(model)
-
     
+    if replace_quantizable_operators_using_tracing:
+        if inplace:
+            raise ValueError("Cannot use tracing to replace operators in-place")
+        if example_args is None:
+            raise ValueError("example_args must be provided when using tracing to replace operators")
+        model = _tracing_replace_all_quantizable_operators(model, example_args, config)
+
+
+
     # Add Quantize and Dequantize layers directly into the model structure
     if add_quantize or add_dequantize:
         if use_wrapper:
@@ -86,10 +105,95 @@ def quantize_model(
     _assign_quantizer_debug_labels(model)
     if config.freeze_approximated_scales:
         freeze_approximated_lsq_scales(model)
-
+    
+   
     return model
 
+def is_tensor_node(node):
+    return (
+        isinstance(node, torch.fx.Node)
+        and node.meta["type"] is torch.Tensor
+    )
 
+def _tracing_replace_operator_node_by_pattern_with_quantized_module(
+    search_patterns: set,
+    quantized_module_class: type[HatorchQuantizedOperator],
+    gm: torch.fx.GraphModule,
+    config: ModelQuantConfig,
+):
+    """
+    Replace nodes in the graph with quantized modules.
+    """
+    counter = 0
+
+    for n in gm.graph.nodes:
+        # If the target matches one of the patterns
+        if any(n.target == pattern for pattern in search_patterns):
+            # Set the insert point, add the new node, and replace all uses
+            # of `n` with the new node
+            name = f"quant_{quantized_module_class.operator_name}_{counter}"
+            layer_config = config.get_config_for_layer(name)
+
+            counter += 1
+
+            quantize_left_activation = is_tensor_node(n.args[0])
+            quantize_right_activation = is_tensor_node(n.args[1])
+            quant_add = quantized_module_class.from_config(quantize_left_activation=quantize_left_activation, quantize_right_activation=quantize_right_activation, layer_config=layer_config)
+            
+            gm.add_module(name, quant_add)
+            with gm.graph.inserting_after(n):
+                new_node = gm.graph.call_module(name, args=n.args, kwargs=n.kwargs)
+                # We use the meta field to check if the input args are tensors (and should thus be quantized).
+                # We copy the meta field to the newly created node to preserve the information for later nodes that will use this node as arg
+                new_node.meta = n.meta.copy()
+
+                print(f"Replacing {n} with {new_node}")
+                print(n.args)
+                print(n.kwargs)
+                n.replace_all_uses_with(new_node)
+            # Remove the old node from the graph
+            gm.graph.erase_node(n)
+
+def _tracing_replace_all_quantizable_operators(model: nn.Module, example_args: tuple[torch.Tensor], config: ModelQuantConfig) -> nn.Module:
+    """
+    Replace Tensor operators by quantized versions using torch tracing API
+
+    The following operators will be replaced by their quantized versions:
+    - addition (`torch.add`, `operator.add` and `tensor.add`)
+    - multiplication (`torch.mul`, `operator.mul` and `tensor.mul`)
+
+    This method should be called on a non-quantized nn.Module (ie: before replacing layers with quantized versions).
+    The model will be traced and the operators will be replaced by their quantized versions.
+    """
+    gm = torch.fx.symbolic_trace(model)
+    ShapeProp(gm).propagate(*example_args)
+
+    add_patterns = set([operator.add, torch.add, "add"])
+    mul_patterns = set([operator.mul, torch.mul, "mul"])
+    #add_patterns = set([torch.ops.aten.add.Tensor,])
+    _tracing_replace_operator_node_by_pattern_with_quantized_module(
+        add_patterns,
+        QuantAdd,
+        gm,
+        config,
+    )
+
+    # _tracing_replace_operator_node_by_pattern_with_quantized_module(
+    #     mul_patterns,
+    #     QuantMul,
+    #     gm,
+    #     config,
+    # )
+
+    # Does some checks to make sure the
+    # graph is well-formed.
+    gm.graph.lint()
+    # Don't forget to recompile!
+    gm.recompile()
+
+    gm.graph.print_tabular()
+
+    return gm
 
 def _assign_quantizer_debug_labels(model: nn.Module) -> None:
     """Attach stable module-path labels to quantizers for debugging."""

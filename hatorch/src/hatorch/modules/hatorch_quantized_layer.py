@@ -56,6 +56,8 @@ class HatorchExportableModule(nn.Module):
         """
         previous_mode = self.forward_mode
         self.set_recursive_forward_mode(ForwardMode.ONNX)
+        training = self.training  # Store the current training mode
+        self.eval()  # Set the model to evaluation mode for export
         torch.onnx.export(
             self,
             example_inputs,
@@ -67,11 +69,69 @@ class HatorchExportableModule(nn.Module):
             },
             input_names=input_names if input_names is not None else ["input"],
             output_names=output_names if output_names is not None else ["output"],
+            external_data=False,
         )
         self.set_recursive_forward_mode(previous_mode)
+        if training:
+            self.train()  # Restore the original training mode
 
 
 NonQuantizedModuleType = TypeVar("NonQuantizedModuleType", bound=nn.Module)
+
+
+class HatorchQuantizedOperator(HatorchExportableModule):
+    """
+    Base class for quantized operators in Hatorch.
+    """
+
+    operator_name: str
+
+    @overload
+    def forward(self, x: QuantTensor, y: QuantTensor) -> QuantTensor: ...
+
+    @overload
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor: ...
+
+    @torch.compile(dynamic=True)
+    def forward(
+        self,
+        input: QuantTensor | torch.Tensor,
+        other: QuantTensor | torch.Tensor,
+        *args,
+        **kwargs,
+    ) -> QuantTensor | torch.Tensor:
+        # TODO: maybe replace assert with type casting
+        if self.forward_mode == ForwardMode.ONNX:
+            return self.forward_onnx(input, other, *args, **kwargs)
+        elif self.forward_mode == ForwardMode.HATORCH:
+            return self.forward_hatorch(input, other, *args, **kwargs)
+        else:
+            raise ValueError(f"Unsupported forward mode: {self.forward_mode}")
+
+    def forward_hatorch(
+        self, input: QuantTensor, other: QuantTensor, *args, **kwargs
+    ) -> QuantTensor:
+        raise NotImplementedError("Hatorch forward not implemented for this layer")
+
+    def forward_onnx(
+        self, input: torch.Tensor, other: torch.Tensor, *args, **kwargs
+    ) -> torch.Tensor:
+        raise NotImplementedError("ONNX export not implemented for this layer")
+
+    @classmethod
+    def from_config(
+        cls,
+        layer_config: LayerQuantConfig,
+    ) -> Self:
+        """
+        Create a quantized layer from a non-quantized layer using the provided configuration.
+
+        The method except parameters to be copied from the non-quantized layer.
+
+        Args:
+            layer_config: The configuration for the quantized layer.
+        """
+        raise NotImplementedError("from_config not implemented for this layer")
 
 
 class HatorchQuantizedLayer(Generic[NonQuantizedModuleType], HatorchExportableModule):
@@ -116,9 +176,7 @@ class HatorchQuantizedLayer(Generic[NonQuantizedModuleType], HatorchExportableMo
 
         Args:
             layer: The non-quantized layer to convert.
-            weight_quantizer: The quantizer to use for the weights.
-            activation_quantizer: The quantizer to use for the activations.
-            bias_quantizer: The quantizer to use for the bias.
+            layer_config: The configuration for the quantized layer.
         """
         raise NotImplementedError(
             "from_non_quantized_layer not implemented for this layer"

@@ -22,16 +22,11 @@ class QuantizeWrapper(Generic[LayerType], HatorchExportableModule):
         self.dequantize = Dequantize()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO: maybe replace assert with type casting
         if self.forward_mode == ForwardMode.ONNX:
-            assert isinstance(x, torch.Tensor), (
-                "ONNX forward mode requires Tensor input"
-            )
+            # x should be a Tensor
             return self.forward_onnx(x)
         elif self.forward_mode == ForwardMode.HATORCH:
-            assert isinstance(x, torch.Tensor), (
-                "QuantTensor forward mode requires Tensor input"
-            )
+            # x should be a Tensor
             return self.forward_hatorch(x)
         else:
             raise ValueError(f"Unsupported forward mode: {self.forward_mode}")
