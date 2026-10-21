@@ -192,6 +192,8 @@ class ConvolutionalBlock1D(nn.Module):
             raise NotImplementedError("Cummulative Layer Norm is not implemented.")
         elif norm_type == NormType.global_layer_norm:
             self.normalization1 = GlobalLayerNorm(channel_size=hidden_channels)
+        elif norm_type == NormType.batch_norm:
+            self.normalization1 = nn.BatchNorm1d(hidden_channels)
 
         self.dconv = nn.Conv1d(
             in_channels=hidden_channels,
@@ -207,6 +209,8 @@ class ConvolutionalBlock1D(nn.Module):
             raise NotImplementedError("Cummulative Layer Norm is not implemented.")
         elif norm_type == NormType.global_layer_norm:
             self.normalization2 = GlobalLayerNorm(channel_size=hidden_channels)
+        elif norm_type == NormType.batch_norm:
+            self.normalization2 = nn.BatchNorm1d(hidden_channels)
 
         self.skip_conv1d = nn.Conv1d(
             in_channels=hidden_channels,

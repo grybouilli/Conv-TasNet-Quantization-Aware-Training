@@ -7,6 +7,7 @@ from torch import nn
 class NormType(Enum):
     global_layer_norm = "global_layer_norm"
     channel_layer_norm = "channel_layer_norm"
+    batch_norm = "batch_norm"
 
 
 def global_layer_norm(
@@ -102,3 +103,34 @@ class GlobalLayerNorm(nn.Module):
         return global_layer_norm_using_torch_layer_norm(
             x, self.gamma, self.beta, self.channel_size, self.eps
         )
+
+
+@torch.no_grad()
+def fold_conv_bn(conv: torch.nn.Conv1d, bn: torch.nn.BatchNorm1d) -> torch.nn.Conv1d:
+    """Folds a batch norm into a preceding convolution (conv 1x1 or depthwise convolution).
+    Should be used only for evaluation models.
+
+    Args:
+        conv (torch.nn.Conv1d): the convolution preceding the norm
+        bn (torch.nn.BatchNorm1d): the batch norm to fold
+
+    Returns:
+        torch.nn.Conv1d: the resulting convolution containing the folded batch norm
+    """
+    scale = bn.weight / torch.sqrt(bn.running_var + bn.eps)  # [C_out]
+    fused = torch.nn.Conv1d(
+        conv.in_channels,
+        conv.out_channels,
+        conv.kernel_size,
+        stride=conv.stride,
+        padding=conv.padding,
+        dilation=conv.dilation,
+        groups=conv.groups,
+        bias=True,
+    )
+    fused.weight.copy_(conv.weight * scale.view(-1, 1, 1))
+    conv_bias = (
+        conv.bias if conv.bias is not None else torch.zeros_like(bn.running_mean)
+    )
+    fused.bias.copy_((conv_bias - bn.running_mean) * scale + bn.bias)
+    return fused
