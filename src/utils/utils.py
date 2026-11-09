@@ -59,21 +59,24 @@ def get_data_loaders(
         segment=conf.data.segment,
     )
 
-    train_loader = DataLoader(
-        train_set,
-        shuffle=True,
-        batch_size=conf.training.batch_size,
-        num_workers=conf.training.num_workers,
-        drop_last=True,
-    )
+    num_workers = conf.training.num_workers
+    has_workers = num_workers > 0
 
-    val_loader = DataLoader(
-        val_set,
-        shuffle=False,
+    # These options are only valid / useful when worker processes are used
+    loader_kwargs = dict(
         batch_size=conf.training.batch_size,
-        num_workers=conf.training.num_workers,
+        num_workers=num_workers,
         drop_last=True,
+        pin_memory=torch.cuda.is_available(),
     )
+    if has_workers:
+        loader_kwargs.update(
+            persistent_workers=True,  # don't respawn workers every epoch
+            prefetch_factor=4,  # batches pre-loaded per worker
+        )
+
+    train_loader = DataLoader(train_set, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_set, shuffle=False, **loader_kwargs)
 
     return train_loader, val_loader
 
@@ -143,9 +146,14 @@ def load_trained_model(
     compile: bool = False,
     strict_load_state_dict: bool = True,
     config_name: str | None = None,
+    trained_model: str | None = None,
 ) -> ConvTasNet | QuantizeWrapper[ConvTasNet]:
     exp_dir = conf.exp_dir
-    trained_model = os.path.join(exp_dir, "compiled_model.pth")
+    trained_model = (
+        os.path.join(exp_dir, "compiled_model.pth")
+        if trained_model is None
+        else trained_model
+    )
 
     model: ConvTasNet = construct_model(conf=conf)
     # model = quantize_model(model)
@@ -171,9 +179,20 @@ def load_trained_model(
             raise ValueError(
                 "The state dict contains keys with 'module._orig_mod.', which indicates that a compiled model was quantized instead of compiling a quantized model"
             )
+    if "state_dict" in state_dict:
+        print("[WARN]: loading model from checkpoint")
+        state_dict = state_dict["state_dict"]
 
     if compile:
         model: ConvTasNet = torch.compile(model)
+        for key in state_dict.keys():
+            if "model._orig_mod" in key:
+                state_dict = {
+                    k.replace("model._orig_mod.", "_orig_mod."): v
+                    for k, v in state_dict.items()
+                }
+                break
+
     else:
         state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 

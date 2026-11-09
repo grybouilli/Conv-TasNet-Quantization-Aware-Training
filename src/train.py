@@ -33,7 +33,7 @@ devices = "auto"
 strategy = "auto"
 
 
-def train(conf: Conf):
+def train(conf: Conf, resume_from: None | str = None):
 
     if conf.training.seed:
         print(f"Setting seed to {conf.training.seed}")
@@ -42,8 +42,11 @@ def train(conf: Conf):
     train_loader, val_loader = get_data_loaders(conf=conf)
 
     print(torch.cuda.memory_summary(device=None, abbreviated=False))
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cudnn.benchmark = True
 
     model: ConvTasNet = construct_model(conf=conf)
+    model.compile()          # in-place: state_dict keys keep their names (no `_orig_mod.` prefix)
 
     optimizer = Adam(
         model.parameters(),
@@ -104,7 +107,7 @@ def train(conf: Conf):
         module,
         train_dataloaders=train_loader,
         val_dataloaders=val_loader,
-        # ckpt_path="",
+        ckpt_path=resume_from,
     )
 
     export_path = os.path.join(exp_dir, "compiled_model.pth")
@@ -113,17 +116,24 @@ def train(conf: Conf):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print(__doc__)
-        sys.exit(1)
+    from argparse import ArgumentParser
+    parser = ArgumentParser()
+    parser.add_argument("config", type=str)
+    parser.add_argument("--config_dir", type=str, default=".")
+    parser.add_argument("--resume_from", type=str, default=None)
 
-    model_archi = sys.argv[1]
+    args = parser.parse_args()
+
+    
+    model_archi = args.config
+    resume_from = args.resume_from
+
     print(f"Using model architecture: {model_archi}")
 
-    CONF_PATH = f"conf_{model_archi}.yml"
+    CONF_PATH = os.path.join(args.config_dir, f"conf_{model_archi}.yml")
     with open(CONF_PATH) as f:
         conf_data = yaml.safe_load(f)
 
     conf = Conf(conf_data)
 
-    train(conf=conf)
+    train(conf=conf, resume_from=resume_from)
