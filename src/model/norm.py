@@ -8,7 +8,9 @@ import numpy as np
 class NormType(Enum):
     global_layer_norm = "global_layer_norm"
     channel_layer_norm = "channel_layer_norm"
+    ema_cln = "ema_cln"
     batch_norm = "batch_norm"
+    rms_norm = "rms_norm"
 
 def global_layer_norm(
     input: torch.Tensor,
@@ -178,3 +180,57 @@ def fold_conv_bn(conv: torch.nn.Conv1d, bn: torch.nn.BatchNorm1d) -> torch.nn.Co
     )
     fused.bias.copy_((conv_bias - bn.running_mean) * scale + bn.bias)
     return fused
+
+
+def running_avg(v, cap):
+    """v: [B, T] per-frame values. Exact cumulative mean for t <= cap, then EMA with alpha = 1/cap."""
+    B, T = v.shape
+    K = min(cap, T)
+    t = torch.arange(1, K + 1, device=v.device, dtype=v.dtype)
+    head = torch.cumsum(v[:, :K], dim=1) / t
+    if T <= cap:
+        return head
+
+    a = 1.0 / cap
+    d = 1.0 - a
+    out, prev = [head], head[:, -1:]
+    for s in range(K, T, cap):  # ~T/cap iterations, usually 1-2
+        blk = v[:, s : s + cap]
+        t = torch.arange(1, blk.size(1) + 1, device=v.device, dtype=v.dtype)
+        dt = d**t
+        ema = dt * prev + a * dt * torch.cumsum(
+            blk / dt, dim=1
+        )  # blk / dt == blk * d^-t
+        out.append(ema)
+        prev = ema[:, -1:]
+    return torch.cat(out, dim=1)
+
+
+class cLN_EMA(nn.Module):
+    def __init__(self, dimension, n_cap=2048, eps=1e-8, trainable=True):
+        super().__init__()
+        self.eps, self.n_cap = eps, n_cap
+        if trainable:
+            self.gain = nn.Parameter(torch.ones(1, dimension, 1))
+            self.bias = nn.Parameter(torch.zeros(1, dimension, 1))
+        else:
+            self.register_buffer("gain", torch.ones(1, dimension, 1))
+            self.register_buffer("bias", torch.zeros(1, dimension, 1))
+
+    def forward(self, x):  # x: [B, C, T]
+        xf = x.float()  # keep stats in fp32
+        mean = running_avg(xf.mean(1), self.n_cap)
+        msq = running_avg(xf.pow(2).mean(1), self.n_cap)
+        std = ((msq - mean.pow(2)).clamp_min(0) + self.eps).sqrt()
+        y = (xf - mean.unsqueeze(1)) / std.unsqueeze(1)
+        return (y * self.gain + self.bias).to(x.dtype)
+
+
+class ChannelRMSNorm(nn.Module):
+    def __init__(self, channels: int, eps: float | None = 1e-6):
+        super().__init__()
+        self.norm = nn.RMSNorm(channels, eps=eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # [B, C, L] -> [B, L, C] -> norm over C -> back
+        return self.norm(x.transpose(1, 2)).transpose(1, 2)

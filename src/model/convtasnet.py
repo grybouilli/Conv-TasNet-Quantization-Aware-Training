@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 
-from model.norm import GlobalLayerNorm, NormType, cLN
+from model.norm import GlobalLayerNorm, NormType, cLN, cLN_EMA, ChannelRMSNorm
 from utils.conf import Conf
 
 """
@@ -60,7 +60,7 @@ class Encoder(nn.Module):
             padding=(0),
             dilation=1,
         )
-    
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -182,7 +182,10 @@ class ConvolutionalBlock1D(nn.Module):
             self.normalization1 = GlobalLayerNorm(channel_size=hidden_channels)
         elif norm_type == NormType.batch_norm:
             self.normalization1 = nn.BatchNorm1d(hidden_channels)
-
+        elif norm_type == NormType.ema_cln:
+            self.normalization1 = cLN_EMA(hidden_channels)
+        elif norm_type == NormType.rms_norm:
+            self.normalization1 = ChannelRMSNorm(hidden_channels)
         self.dconv = nn.Conv1d(
             in_channels=hidden_channels,
             out_channels=hidden_channels,
@@ -199,6 +202,10 @@ class ConvolutionalBlock1D(nn.Module):
             self.normalization2 = GlobalLayerNorm(channel_size=hidden_channels)
         elif norm_type == NormType.batch_norm:
             self.normalization2 = nn.BatchNorm1d(hidden_channels)
+        elif norm_type == NormType.ema_cln:
+            self.normalization2 = cLN_EMA(hidden_channels)
+        elif norm_type == NormType.rms_norm:
+            self.normalization2 = ChannelRMSNorm(hidden_channels)
 
         self.skip_conv1d = nn.Conv1d(
             in_channels=hidden_channels,
@@ -213,6 +220,7 @@ class ConvolutionalBlock1D(nn.Module):
 
         self.K = kernel_size
         self.D = dilation
+
     def forward(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -301,7 +309,10 @@ class TCN(nn.Module):
             self.layer_norm = GlobalLayerNorm(channel_size=input_dim)
         elif norm_type == NormType.batch_norm:
             self.layer_norm = torch.nn.BatchNorm1d(input_dim)
-
+        elif norm_type == NormType.ema_cln:
+            self.layer_norm = cLN_EMA(input_dim)
+        elif norm_type == NormType.rms_norm:
+            self.layer_norm = ChannelRMSNorm(input_dim)
         self.bottleneck_layer = nn.Conv1d(
             in_channels=input_dim,
             out_channels=bottleneck_dim,
@@ -480,9 +491,11 @@ class ConvTasNet(nn.Module):
     def pad_signal(self, x):
         x = x.unsqueeze(1) if x.dim() == 2 else x
         n = x.size(-1)
-        P = self.encoder_kernel_size - self.stride          # 32 left pad = streaming buffer size
-        R0 = (-n) % self.stride                             # align length to the stride
-        x = F.pad(x, (P, P + R0))                           # (P, 32 + R0)
+        P = (
+            self.encoder_kernel_size - self.stride
+        )  # 32 left pad = streaming buffer size
+        R0 = (-n) % self.stride  # align length to the stride
+        x = F.pad(x, (P, P + R0))  # (P, 32 + R0)
         return x, R0
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -516,6 +529,7 @@ class ConvTasNet(nn.Module):
         # See the paper implementation
         output = dec_output[:, :, P : P + n].contiguous()
         output = output.view(batch_size, n_src, -1)
+
         # output shape: [Batch, n_src, L]
         return output
 
@@ -541,9 +555,10 @@ def test_encoder():
     enc_output = encoder(x)
 
     print("Output shape:", enc_output.shape)
-    assert (enc_output.size(0), enc_output.size(1)) == (x.size(0), enc_dim), (
-        f"Encoder output shape {enc_output.shape} does not match expected shape ({x.size(0)}, {enc_dim}, _)"
-    )
+    assert (enc_output.size(0), enc_output.size(1)) == (
+        x.size(0),
+        enc_dim,
+    ), f"Encoder output shape {enc_output.shape} does not match expected shape ({x.size(0)}, {enc_dim}, _)"
 
 
 def test_decoder():
@@ -557,9 +572,10 @@ def test_decoder():
     dec_output = decoder(x)
 
     print("Output shape:", dec_output.shape)
-    assert (dec_output.size(0), dec_output.size(1)) == (x.size(0), 1), (
-        f"Decoder output shape {dec_output.shape} does not match expected shape ({x.size(0)}, 1, _)"
-    )
+    assert (dec_output.size(0), dec_output.size(1)) == (
+        x.size(0),
+        1,
+    ), f"Decoder output shape {dec_output.shape} does not match expected shape ({x.size(0)}, 1, _)"
 
 
 def test_ConvolutionalBlock1D():
@@ -579,12 +595,16 @@ def test_ConvolutionalBlock1D():
         output, skip = conv_block(x)
         print("output.shape:", output.shape)
         print("skip.shape:", skip.shape)
-        assert output.shape == (x.size(0), x.size(1), x.size(2)), (
-            f"Output shape {output.shape} does not match input shape {x.shape}"
-        )
-        assert skip.shape == (x.size(0), 128, x.size(2)), (
-            f"Skip connection shape {skip.shape} does not match input shape {x.shape}"
-        )
+        assert output.shape == (
+            x.size(0),
+            x.size(1),
+            x.size(2),
+        ), f"Output shape {output.shape} does not match input shape {x.shape}"
+        assert skip.shape == (
+            x.size(0),
+            128,
+            x.size(2),
+        ), f"Skip connection shape {skip.shape} does not match input shape {x.shape}"
 
 
 def test_TCN():
@@ -602,9 +622,12 @@ def test_TCN():
     )
     output = tcn(x)
     print("output.shape:", output.shape)
-    assert output.shape == (batch, n_src, N, L), (
-        f"Output shape {output.shape} does not match input shape {x.shape}"
-    )
+    assert output.shape == (
+        batch,
+        n_src,
+        N,
+        L,
+    ), f"Output shape {output.shape} does not match input shape {x.shape}"
 
 
 def test_ConvTasNet():
@@ -635,9 +658,11 @@ def test_ConvTasNet():
     # convTasNet = ConvTasNet()
     enc_output = convTasNet(x)
     print("Output shape:", enc_output.shape)
-    assert enc_output.shape == (x.size(0), 2, x.size(1)), (
-        f"Output shape {enc_output.shape} does not match expected shape ({x.size(0)}, 2, {x.size(1)})"
-    )
+    assert enc_output.shape == (
+        x.size(0),
+        2,
+        x.size(1),
+    ), f"Output shape {enc_output.shape} does not match expected shape ({x.size(0)}, 2, {x.size(1)})"
 
 
 if __name__ == "__main__":

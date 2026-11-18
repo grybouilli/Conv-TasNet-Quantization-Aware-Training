@@ -1,17 +1,19 @@
 import torch
 import torch.nn as nn
-from model.norm import NormType, cLN
+from model.norm import NormType, cLN, cLN_EMA
 from model.convtasnet import ConvTasNet
-from model.streamable_convtasnet import StreamableConvTasNet, StreamableConvTasNetcLN
+from model.streamable_convtasnet import StreamableConvTasNet, StreamableConvTasNetcLN, StreamingEMAcLN
 from argparse import ArgumentParser, BooleanOptionalAction
 from utils.utils import construct_model, load_trained_model
 from utils.conf import Conf
 import yaml
+import torch.onnx
 
 parser = ArgumentParser()
 parser.add_argument("config", type=str)
 parser.add_argument("off_onnx", type=str)
 parser.add_argument("stream_onnx", type=str)
+parser.add_argument("--offline_pth", type=str, default=None)
 parser.add_argument("--stream_pth", type=str, default=None)
 parser.add_argument("--model", type=str, default=None)
 parser.add_argument("--ckpt", action=BooleanOptionalAction, default=False)
@@ -25,22 +27,8 @@ model = load_trained_model(
     conf, eval=False, compile=args.ckpt, config_name=None, trained_model=args.model
 )
 model.eval()
-
-norm_type = None
-if isinstance(model.tcn.layer_norm, nn.BatchNorm1d):
-    streamable = StreamableConvTasNet(model)
-    norm_type = NormType.batch_norm
-elif isinstance(model.tcn.layer_norm, cLN):
-    streamable = StreamableConvTasNetcLN(model)
-    norm_type = NormType.channel_layer_norm
-else:
-    raise Exception("Non streamable layer norm in TCN")
-streamable.eval()
-
-if args.stream_pth is not None:
-    torch.save(streamable, args.stream_pth)
-
-import torch.onnx
+if args.offline_pth is not None:
+    torch.save(model, args.offline_pth)
 
 x_ns = torch.zeros(1, 16000)
 torch.onnx.export(
@@ -52,6 +40,24 @@ torch.onnx.export(
     dynamo=True,
     external_data=False,
 )
+
+norm_type = None
+if isinstance(model.tcn.layer_norm, nn.BatchNorm1d):
+    streamable = StreamableConvTasNet(model)
+    norm_type = NormType.batch_norm
+elif isinstance(model.tcn.layer_norm, cLN):
+    streamable = StreamableConvTasNetcLN(model)
+    norm_type = NormType.channel_layer_norm
+elif isinstance(model.tcn.layer_norm, cLN_EMA):
+    streamable = StreamableConvTasNetcLN(model, StreamingEMAcLN)
+    norm_type = NormType.channel_layer_norm
+else:
+    raise Exception("Non streamable layer norm in TCN")
+streamable.eval()
+
+if args.stream_pth is not None:
+    torch.save(streamable, args.stream_pth)
+
 if norm_type == NormType.batch_norm:
     x, (audio_states, tcn_states, tail_states) = (
         torch.zeros(1, 128),
@@ -69,7 +75,8 @@ output_names = ["y", "next_audio_states", "next_tcn_states", "next_tail_states"]
 if norm_type == NormType.channel_layer_norm:
     input_names.insert(-1, "cln_states")
     output_names.insert(-1, "next_cln_states")
-
+    print(input_names)
+    print(output_names)
 dummy_input = (
     (x, audio_states, tcn_states, tail_states)
     if norm_type == NormType.batch_norm

@@ -5,8 +5,64 @@ import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 
-from model.norm import GlobalLayerNorm, NormType, fold_conv_bn, cLN
+from model.norm import GlobalLayerNorm, NormType, fold_conv_bn, cLN, cLN_EMA
 from model.convtasnet import ConvTasNet, ConvolutionalBlock1D, TCN
+
+
+class StreamingEMAcLN(nn.Module):
+    """state: [B, 3] fp16 = (running mean, running var, n_frames capped at n_cap)."""
+
+    def __init__(self, src: cLN_EMA, n_cap: int = 2048):
+        super().__init__()
+        self.src = src
+        self.n_cap = n_cap
+
+    @staticmethod
+    def init_state(batch_size, device="cpu"):
+        return torch.zeros(batch_size, 3, device=device, dtype=torch.float16)
+
+    def _running_avg(self, v, v0, n0):
+        """v: [B,T] per-frame values, v0: [B,1] running avg so far, n0: [B,1] frame count (fp32).
+        Exact cumulative average while n <= n_cap, then EMA with alpha = 1/n_cap."""
+        T = v.size(1)
+        cap = float(self.n_cap)
+        t = torch.arange(1, T + 1, device=v.device, dtype=v.dtype).view(1, -1)
+        n = n0 + t
+
+        # phase 1: exact cumulative average, written in deviation form (stays in data range)
+        avg = v0 + torch.cumsum(v - v0, dim=1) / n
+
+        # phase 2: frames beyond the cap use a fixed-alpha EMA (closed form, vectorised)
+        k = (cap - n0).clamp(0, T)  # [B,1] frames in phase 1
+        idx = (k - 1).clamp_min(0).long()
+        avg_k = torch.where(k > 0, avg.gather(1, idx), v0)  # avg at the switch point
+        a = 1.0 / cap
+        d = 1.0 - a
+        late = t > k  # [B,T]
+        S = torch.cumsum(torch.where(late, v * d ** (-t), torch.zeros_like(v)), dim=1)
+        ema = d ** (t - k) * avg_k + a * d**t * S
+        return torch.where(late, ema, avg)
+
+    def forward(self, x, state):  # x: [B, C, T]
+        s = self.src
+        T = x.size(2)
+        mu0, var0, n0 = state[:, 0:1], state[:, 1:2], state[:, 2:3]
+
+        m = x.mean(1)  # [B, T]
+        q = x.pow(2).mean(1)  # [B, T]
+        mean = self._running_avg(m, mu0, n0)
+        msq = self._running_avg(q, var0 + mu0.pow(2), n0)  # rebuild msq in fp32
+        var = (msq - mean.pow(2)).clamp_min(0)
+        std = (var + s.eps).sqrt()  # eps is fine in fp32
+
+        y = (x - mean.unsqueeze(1)) / std.unsqueeze(1)
+        y = y.to(x.dtype) * s.gain.to(x.dtype) + s.bias.to(x.dtype)
+
+        n_new = (n0 + T).clamp_max(float(self.n_cap))  # [B,1]
+        new_state = torch.cat([mean[:, -1:], var[:, -1:], n_new], dim=1)
+        new_state = new_state.clamp(-65504, 65504)
+        return y, new_state
+
 
 class StreamingcLN(nn.Module):
     """Chunked cLN. state: [B, 3] = (cum_sum, cum_pow_sum, n_entries), zeros at stream start."""
@@ -44,11 +100,13 @@ class StreamingConvBlock1DcLN(nn.Module):
     """Chunked streaming view of a trained, causal ConvolutionalBlock1D (eval mode, BN norm)."""
 
     @torch.no_grad()
-    def __init__(self, src: ConvolutionalBlock1D):
+    def __init__(self, src: ConvolutionalBlock1D, cln_type=StreamingcLN):
         super().__init__()
         if src.normalization1.training or src.normalization2.training:
             raise ValueError("Call model.eval() first: BN must use running stats.")
-        if isinstance(src.normalization1, cLN):
+        if isinstance(src.normalization1, cLN) or isinstance(
+            src.normalization1, cLN_EMA
+        ):
             self.norm_type = NormType.channel_layer_norm
         else:
             raise ValueError("Only cLN is streamable here.")
@@ -56,16 +114,8 @@ class StreamingConvBlock1DcLN(nn.Module):
         self.K, self.D = src.K, src.D
         self.buf = (self.K - 1) * self.D  # past frames to keep
         self.hidden = src.dconv.in_channels
-        self.normalization1 = StreamingcLN(self.src.normalization1)
-        self.normalization2 = StreamingcLN(self.src.normalization2)
-
-    def init_state(self, batch_size, device, dtype=torch.float32) -> torch.Tensor:
-        # zeros == the F.pad zeros used in the offline forward
-        return (
-            torch.zeros(batch_size, self.hidden, self.buf, device=device, dtype=dtype),
-            StreamingcLN(batch_size, device, dtype),
-            StreamingcLN(batch_size, device, dtype),
-        )
+        self.normalization1 = cln_type(self.src.normalization1)
+        self.normalization2 = cln_type(self.src.normalization2)
 
     def forward(self, x: torch.Tensor, state: torch.Tensor, cln_states: torch.Tensor):
         cln1_state, cln2_state = cln_states[..., :3], cln_states[..., 3:]
@@ -98,14 +148,14 @@ class StreamableTCNcLN(nn.Module):
         base: The trained TCN
     """
 
-    def __init__(self, base: TCN):
+    def __init__(self, base: TCN, cln_type = StreamingcLN):
         super().__init__()
         # (asserts on eval mode / non-global norm as before)
         self.base = base
-        self.layers = nn.ModuleList(StreamingConvBlock1DcLN(l) for l in base.layers)
+        self.layers = nn.ModuleList(StreamingConvBlock1DcLN(l, cln_type=cln_type) for l in base.layers)
         self.sizes = [l.buf for l in self.layers]  # e.g. [2, 4, ..., 256, 2, ...]
         self.hidden = self.layers[0].hidden
-        self.layer_norm = StreamingcLN(self.base.layer_norm)
+        self.layer_norm = cln_type(self.base.layer_norm)
 
     def init_states(self, batch_size, device="cpu", dtype=torch.float32):
         return torch.zeros(
@@ -135,10 +185,10 @@ class StreamableTCNcLN(nn.Module):
 
 
 class StreamableConvTasNetcLN(nn.Module):
-    def __init__(self, base: ConvTasNet, chunk: int = 128):
+    def __init__(self, base: ConvTasNet, cln_type = StreamingcLN, chunk: int = 128):
         super().__init__()
         self.base = base.eval()
-        self.tcn = StreamableTCNcLN(base.tcn)
+        self.tcn = StreamableTCNcLN(base.tcn, cln_type=cln_type)
         self.overlap = base.encoder_kernel_size - base.stride  # 32
         self.chunk = chunk
         self.T = (
