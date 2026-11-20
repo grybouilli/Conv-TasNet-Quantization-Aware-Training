@@ -15,7 +15,12 @@ from hatorch.layers.quantized_convtranspose1d import QuantConvTranspose1d
 from hatorch.layers.quantized_sigmoid import QuantSigmoid
 from hatorch.layers.quantized_prelu import QuantPReLU
 
-from hatorch.layers.quantized_conv2d_bn_relu import QuantConvBn2d, QuantConvBnReLU2d, QuantConvReLU2d
+from hatorch.layers.quantized_conv1d_bn import QuantConvBn1d
+from hatorch.layers.quantized_conv2d_bn_relu import (
+    QuantConvBn2d,
+    QuantConvBnReLU2d,
+    QuantConvReLU2d,
+)
 from hatorch.layers.quantized_linear import QuantLinear
 from hatorch.layers.quantized_relu import QuantReLU
 from hatorch.layers.quantized_maxpool2d import QuantMaxPool2d
@@ -27,7 +32,10 @@ from hatorch.modules.dequantize import Dequantize
 from hatorch.transforms.config import LayerQuantConfig, ModelQuantConfig, QuantizerSpec
 from hatorch.quantizers.base import BaseQuantizer
 from hatorch.modules.quantize_wrapper import QuantizeWrapper
-from hatorch.modules.hatorch_quantized_layer import HatorchQuantizedLayer, HatorchQuantizedOperator
+from hatorch.modules.hatorch_quantized_layer import (
+    HatorchQuantizedLayer,
+    HatorchQuantizedOperator,
+)
 from hatorch.quantizers.common._common_quantizer import BaseLearnedQuantizer
 from hatorch.quantizers.common.scale_approximation import ScaleApproximation
 from hatorch.quantizers.init.lsq_uniform import LsqUniformQuantizer
@@ -38,8 +46,13 @@ from hatorch.operators.quantized_mul import QuantMul
 import operator
 from torch.fx.passes.shape_prop import ShapeProp
 
-
-HATORCH_QUANTIZED_LAYERS_CLASS = [QuantConv2d, QuantConv1d, QuantConvTranspose1d, QuantPReLU, QuantSigmoid]
+HATORCH_QUANTIZED_LAYERS_CLASS = [
+    QuantConv2d,
+    QuantConv1d,
+    QuantConvTranspose1d,
+    QuantPReLU,
+    QuantSigmoid,
+]
 
 
 def quantize_model(
@@ -51,11 +64,13 @@ def quantize_model(
     example_args: Optional[tuple[torch.Tensor]] = None,
     use_wrapper: bool = False,
     replace_quantizable_operators_using_tracing: bool = False,
-    additional_hatorch_quantized_layers_class: list[HatorchQuantizedLayer] | None = None,
+    additional_hatorch_quantized_layers_class: (
+        list[HatorchQuantizedLayer] | None
+    ) = None,
 ) -> QuantizeWrapper:
     """
     Transform a model by replacing standard layers with quantized versions.
-    
+
     Args:
         model: Original PyTorch model
         config: Quantization configuration specifying which quantizers to use
@@ -70,33 +85,44 @@ def quantize_model(
     """
     if not inplace:
         import copy
+
         model = copy.deepcopy(model)
-    
+
     if replace_quantizable_operators_using_tracing:
         if inplace:
             raise ValueError("Cannot use tracing to replace operators in-place")
         if example_args is None:
-            raise ValueError("example_args must be provided when using tracing to replace operators")
+            raise ValueError(
+                "example_args must be provided when using tracing to replace operators"
+            )
         model = _tracing_replace_all_quantizable_operators(model, example_args, config)
-
-
 
     # Add Quantize and Dequantize layers directly into the model structure
     if add_quantize or add_dequantize:
         if use_wrapper:
             # Wrap the entire model in a QuantizeWrapper
             if inplace:
-                raise ValueError("Cannot use wrapper in-place since it replaces the entire model.")
+                raise ValueError(
+                    "Cannot use wrapper in-place since it replaces the entire model."
+                )
             model = QuantizeWrapper(model)
         else:
             _inject_quantize_dequantize_layers(model, add_quantize, add_dequantize)
-    
+
     # First pass: identify all quantizable layers to determine which is last
-    quantizable_layers = _find_quantizable_layers(model, additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class)
-    
+    quantizable_layers = _find_quantizable_layers(
+        model,
+        additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class,
+    )
+
     # Recursively replace layers
-    _replace_layers_recursive(model, config, "", quantizable_layers, additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class)
-    
+    _replace_layers_recursive(
+        model,
+        config,
+        "",
+        quantizable_layers,
+        additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class,
+    )
 
     # In DDP mode, BatchNorm layers must synchronize running stats across ranks.
     if _should_convert_sync_batchnorm():
@@ -105,15 +131,13 @@ def quantize_model(
     _assign_quantizer_debug_labels(model)
     if config.freeze_approximated_scales:
         freeze_approximated_lsq_scales(model)
-    
-   
+
     return model
 
+
 def is_tensor_node(node):
-    return (
-        isinstance(node, torch.fx.Node)
-        and node.meta["type"] is torch.Tensor
-    )
+    return isinstance(node, torch.fx.Node) and node.meta["type"] is torch.Tensor
+
 
 def _tracing_replace_operator_node_by_pattern_with_quantized_module(
     search_patterns: set,
@@ -138,8 +162,12 @@ def _tracing_replace_operator_node_by_pattern_with_quantized_module(
 
             quantize_left_activation = is_tensor_node(n.args[0])
             quantize_right_activation = is_tensor_node(n.args[1])
-            quant_add = quantized_module_class.from_config(quantize_left_activation=quantize_left_activation, quantize_right_activation=quantize_right_activation, layer_config=layer_config)
-            
+            quant_add = quantized_module_class.from_config(
+                quantize_left_activation=quantize_left_activation,
+                quantize_right_activation=quantize_right_activation,
+                layer_config=layer_config,
+            )
+
             gm.add_module(name, quant_add)
             with gm.graph.inserting_after(n):
                 new_node = gm.graph.call_module(name, args=n.args, kwargs=n.kwargs)
@@ -154,7 +182,10 @@ def _tracing_replace_operator_node_by_pattern_with_quantized_module(
             # Remove the old node from the graph
             gm.graph.erase_node(n)
 
-def _tracing_replace_all_quantizable_operators(model: nn.Module, example_args: tuple[torch.Tensor], config: ModelQuantConfig) -> nn.Module:
+
+def _tracing_replace_all_quantizable_operators(
+    model: nn.Module, example_args: tuple[torch.Tensor], config: ModelQuantConfig
+) -> nn.Module:
     """
     Replace Tensor operators by quantized versions using torch tracing API
 
@@ -170,7 +201,7 @@ def _tracing_replace_all_quantizable_operators(model: nn.Module, example_args: t
 
     add_patterns = set([operator.add, torch.add, "add"])
     mul_patterns = set([operator.mul, torch.mul, "mul"])
-    #add_patterns = set([torch.ops.aten.add.Tensor,])
+    # add_patterns = set([torch.ops.aten.add.Tensor,])
     _tracing_replace_operator_node_by_pattern_with_quantized_module(
         add_patterns,
         QuantAdd,
@@ -195,6 +226,7 @@ def _tracing_replace_all_quantizable_operators(model: nn.Module, example_args: t
 
     return gm
 
+
 def _assign_quantizer_debug_labels(model: nn.Module) -> None:
     """Attach stable module-path labels to quantizers for debugging."""
     for name, module in model.named_modules():
@@ -212,7 +244,9 @@ def _should_convert_sync_batchnorm() -> bool:
 def _find_quantizable_layers(
     module: nn.Module,
     prefix: str = "",
-    additional_hatorch_quantized_layers_class: list[HatorchQuantizedLayer] | None = None,
+    additional_hatorch_quantized_layers_class: (
+        list[HatorchQuantizedLayer] | None
+    ) = None,
 ) -> list:
     """
     Find all quantizable layers (Conv2d, Linear) in the model.
@@ -231,17 +265,27 @@ def _find_quantizable_layers(
         full_name = f"{prefix}.{name}" if prefix else name
 
         found = False
-        for layer_class in HATORCH_QUANTIZED_LAYERS_CLASS + (additional_hatorch_quantized_layers_class or []):
+        for layer_class in HATORCH_QUANTIZED_LAYERS_CLASS + (
+            additional_hatorch_quantized_layers_class or []
+        ):
             if isinstance(child, layer_class.layer_non_quantized_class):
-                quantizable.append((full_name, layer_class.layer_non_quantized_class.__name__))
+                quantizable.append(
+                    (full_name, layer_class.layer_non_quantized_class.__name__)
+                )
                 found = True
                 break
         if not found:
             if isinstance(child, nn.Linear):
-                quantizable.append((full_name, 'Linear'))
-            elif hasattr(child, 'children') and len(list(child.children())) > 0:
-                quantizable.extend(_find_quantizable_layers(child, full_name, additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class))
-        
+                quantizable.append((full_name, "Linear"))
+            elif hasattr(child, "children") and len(list(child.children())) > 0:
+                quantizable.extend(
+                    _find_quantizable_layers(
+                        child,
+                        full_name,
+                        additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class,
+                    )
+                )
+
     return quantizable
 
 
@@ -295,7 +339,9 @@ def _inject_quantize_dequantize_layers(
                     setattr(module, last_name, nn.Sequential(*last_layers))
             else:
                 # Last child is not Sequential: only append the final dequantize.
-                setattr(module, last_name, nn.Sequential(last_child_current, Dequantize()))
+                setattr(
+                    module, last_name, nn.Sequential(last_child_current, Dequantize())
+                )
     else:
         # No Sequential found - wrap all children
         if add_quantize or add_dequantize:
@@ -316,7 +362,7 @@ def _inject_quantize_dequantize_layers(
             for name, _ in children_to_wrap:
                 delattr(module, name)
 
-            module.add_module('_quantized_sequential', nn.Sequential(*layers))
+            module.add_module("_quantized_sequential", nn.Sequential(*layers))
 
 
 def _replace_layers_recursive(
@@ -325,7 +371,9 @@ def _replace_layers_recursive(
     prefix: str = "",
     quantizable_layers: list = None,
     layer_index: list = None,
-    additional_hatorch_quantized_layers_class: list[HatorchQuantizedLayer] | None = None,
+    additional_hatorch_quantized_layers_class: (
+        list[HatorchQuantizedLayer] | None
+    ) = None,
 ) -> None:
     """
     Recursively replace layers in a module with quantized versions.
@@ -360,10 +408,16 @@ def _replace_layers_recursive(
 
         # Determine if this is first or last layer
         is_first_layer = (layer_index[0] == 0) if quantizable_layers else True
-        is_last_layer = (layer_index[0] == len(quantizable_layers) - 1) if quantizable_layers else False
+        is_last_layer = (
+            (layer_index[0] == len(quantizable_layers) - 1)
+            if quantizable_layers
+            else False
+        )
 
         # Get configuration for this layer
-        layer_config = config.get_config_for_layer(full_name, is_first_layer=is_first_layer, is_last_layer=is_last_layer)
+        layer_config = config.get_config_for_layer(
+            full_name, is_first_layer=is_first_layer, is_last_layer=is_last_layer
+        )
 
         # Try to detect ConvBlock pattern (from pytorchcv models)
         # ConvBlock structure: conv (Conv2d) + bn (BatchNorm2d) + [optional] activ (ReLU)
@@ -381,10 +435,14 @@ def _replace_layers_recursive(
         # Try to detect ResUnit pattern (from pytorchcv ResNet models)
         # ResUnit can be BasicBlock (2 convs) or Bottleneck (3 convs)
         if _is_resunit(child):
-            total_layers = len(quantizable_layers) if quantizable_layers is not None else 0
+            total_layers = (
+                len(quantizable_layers) if quantizable_layers is not None else 0
+            )
             current_idx = layer_index[0]
             # Detect identity conv presence to keep layer indexing aligned
-            has_identity_conv = hasattr(child, "identity_conv") and hasattr(child.identity_conv, "conv")
+            has_identity_conv = hasattr(child, "identity_conv") and hasattr(
+                child.identity_conv, "conv"
+            )
 
             # Get configs for conv layers in the ResUnit
             conv1_config = config.get_config_for_layer(
@@ -401,10 +459,12 @@ def _replace_layers_recursive(
             # Check if it's a bottleneck (3 convs)
             conv3_config = None
             num_convs = 2
-            if hasattr(child.body, 'conv3'):
-                conv3_config = config.get_config_for_layer(f"{full_name}.body.conv3",
-                                                            is_first_layer=False,
-                                                            is_last_layer=(current_idx + 2 == total_layers - 1))
+            if hasattr(child.body, "conv3"):
+                conv3_config = config.get_config_for_layer(
+                    f"{full_name}.body.conv3",
+                    is_first_layer=False,
+                    is_last_layer=(current_idx + 2 == total_layers - 1),
+                )
                 num_convs = 3
             # Include identity conv in index accounting
             conv_count = num_convs + (1 if has_identity_conv else 0)
@@ -515,18 +575,18 @@ def _replace_layers_recursive(
                     padding=child.padding,
                     dilation=child.dilation,
                     return_indices=child.return_indices,
-                    ceil_mode=child.ceil_mode
+                    ceil_mode=child.ceil_mode,
                 )
                 setattr(module, name, quant_layer)
 
             elif isinstance(child, nn.AvgPool2d):
                 quant_layer = QuantAveragePool2d(
-                    kernel_size= child.kernel_size,
-                    stride= child.stride,
-                    padding= child.padding,
-                    ceil_mode= child.ceil_mode,
-                    count_include_pad= child.count_include_pad,
-                    divisor_override= child.divisor_override,
+                    kernel_size=child.kernel_size,
+                    stride=child.stride,
+                    padding=child.padding,
+                    ceil_mode=child.ceil_mode,
+                    count_include_pad=child.count_include_pad,
+                    divisor_override=child.divisor_override,
                 )
                 setattr(module, name, quant_layer)
 
@@ -534,23 +594,37 @@ def _replace_layers_recursive(
             elif isinstance(child, nn.Dropout):
                 quant_layer = QuantDropout(p=child.p, inplace=child.inplace)
                 setattr(module, name, quant_layer)
-            
+
             else:
                 replacement_successful = False
-                for layer_class in HATORCH_QUANTIZED_LAYERS_CLASS + (additional_hatorch_quantized_layers_class or []):
+                for layer_class in HATORCH_QUANTIZED_LAYERS_CLASS + (
+                    additional_hatorch_quantized_layers_class or []
+                ):
                     if isinstance(child, layer_class.layer_non_quantized_class):
-                        quant_layer = layer_class.from_non_quantized_layer(layer=child, layer_config=layer_config)
+                        quant_layer = layer_class.from_non_quantized_layer(
+                            layer=child, layer_config=layer_config
+                        )
                         setattr(module, name, quant_layer)
                         layer_index[0] += 1
                         replacement_successful = True
                         break
-            
+
                 if not replacement_successful:
                     # Always recursively process child modules (for nested structures)
-                    if hasattr(child, 'children') and len(list(child.children())) > 0:
-                        _replace_layers_recursive(child, config, full_name, quantizable_layers, layer_index, additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class)
+                    if hasattr(child, "children") and len(list(child.children())) > 0:
+                        _replace_layers_recursive(
+                            child,
+                            config,
+                            full_name,
+                            quantizable_layers,
+                            layer_index,
+                            additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class,
+                        )
 
-def _create_weight_quantizer(_weight: torch.Tensor, spec: Optional[QuantizerSpec], num_channels: int):
+
+def _create_weight_quantizer(
+    _weight: torch.Tensor, spec: Optional[QuantizerSpec], num_channels: int
+):
     """Create weight quantizer from specification."""
     if spec is None:
         return None
@@ -558,8 +632,8 @@ def _create_weight_quantizer(_weight: torch.Tensor, spec: Optional[QuantizerSpec
 
 
 def _create_quant_conv_bn(
-    conv: nn.Conv2d,
-    bn: nn.BatchNorm2d,
+    conv: nn.Conv1d | nn.Conv2d,
+    bn: nn.BatchNorm1d | nn.BatchNorm2d,
     config: LayerQuantConfig,
     fold_batch_norm: bool = True,
 ) -> QuantConvBn2d:
@@ -575,7 +649,9 @@ def _create_quant_conv_bn(
         QuantConvBn2d layer
     """
     # Create quantizers from config
-    weight_quantizer = _create_weight_quantizer(conv.weight, config.weight_quantizer, conv.out_channels)
+    weight_quantizer = _create_weight_quantizer(
+        conv.weight, config.weight_quantizer, conv.out_channels
+    )
 
     activation_quantizer = None
     if config.activation_quantizer is not None:
@@ -585,16 +661,29 @@ def _create_quant_conv_bn(
     if config.bias_quantizer is not None:
         bias_quantizer = config.bias_quantizer
 
-    # Create fused quantized layer
-    return QuantConvBn2d.from_conv_bn(
-        conv,
-        bn,
-        weight_quantizer=weight_quantizer,
-        activation_quantizer=activation_quantizer,
-        bias_quantizer=bias_quantizer,
-        freeze_bn=False,
-        fold_batch_norm=fold_batch_norm,
-    )
+    if isinstance(conv, nn.Conv2d):
+        # Create fused quantized layer
+        return QuantConvBn2d.from_conv_bn(
+            conv,
+            bn,
+            weight_quantizer=weight_quantizer,
+            activation_quantizer=activation_quantizer,
+            bias_quantizer=bias_quantizer,
+            freeze_bn=False,
+            fold_batch_norm=fold_batch_norm,
+        )
+    elif isinstance(conv, nn.Conv1d):
+        return QuantConvBn1d.from_conv_bn(
+            conv,
+            bn,
+            weight_quantizer=weight_quantizer,
+            activation_quantizer=activation_quantizer,
+            bias_quantizer=bias_quantizer,
+            freeze_bn=False,
+            fold_batch_norm=fold_batch_norm,
+        )
+    else:
+        raise Exception(f"Unsupported type of conv: {type(conv)}")
 
 
 def _create_quant_conv_bn_relu(
@@ -615,7 +704,9 @@ def _create_quant_conv_bn_relu(
         QuantConvBnReLU2d layer
     """
     # Create quantizers from config
-    weight_quantizer = _create_weight_quantizer(conv.weight, config.weight_quantizer, conv.out_channels)
+    weight_quantizer = _create_weight_quantizer(
+        conv.weight, config.weight_quantizer, conv.out_channels
+    )
 
     activation_quantizer = None
     if config.activation_quantizer is not None:
@@ -652,7 +743,9 @@ def _create_quant_conv_relu(
         QuantConvReLU2d layer
     """
     # Create quantizers from config
-    weight_quantizer = _create_weight_quantizer(conv.weight, config.weight_quantizer, conv.out_channels)
+    weight_quantizer = _create_weight_quantizer(
+        conv.weight, config.weight_quantizer, conv.out_channels
+    )
 
     activation_quantizer = None
     if config.activation_quantizer is not None:
@@ -687,11 +780,13 @@ def _is_convblock(module: nn.Module) -> bool:
         True if module is a ConvBlock
     """
     # Check for the characteristic structure
-    if not (hasattr(module, 'conv') and hasattr(module, 'bn')):
+    if not (hasattr(module, "conv") and hasattr(module, "bn")):
         return False
 
     # Check types
-    if not isinstance(module.conv, nn.Conv2d) or not isinstance(module.bn, nn.BatchNorm2d):
+    if not isinstance(module.conv, nn.Conv2d) or not isinstance(
+        module.bn, nn.BatchNorm2d
+    ):
         return False
 
     return True
@@ -714,10 +809,12 @@ def _create_quant_from_convblock(
     """
     conv = convblock.conv
     bn = convblock.bn
-    has_activ = hasattr(convblock, 'activ') and isinstance(convblock.activ, nn.ReLU)
+    has_activ = hasattr(convblock, "activ") and isinstance(convblock.activ, nn.ReLU)
 
     # Create quantizers from config
-    weight_quantizer = _create_weight_quantizer(conv.weight, config.weight_quantizer, conv.out_channels)
+    weight_quantizer = _create_weight_quantizer(
+        conv.weight, config.weight_quantizer, conv.out_channels
+    )
 
     activation_quantizer = None
     if config.activation_quantizer is not None:
@@ -776,36 +873,44 @@ def _is_resunit(module: nn.Module) -> bool:
         True if module is a ResUnit (either BasicBlock or Bottleneck)
     """
     # Check for the characteristic structure
-    if not hasattr(module, 'body') or not hasattr(module, 'activ'):
+    if not hasattr(module, "body") or not hasattr(module, "activ"):
         return False
 
     body = module.body
     # Must have at least conv1 and conv2
-    if not hasattr(body, 'conv1') or not hasattr(body, 'conv2'):
+    if not hasattr(body, "conv1") or not hasattr(body, "conv2"):
         return False
 
     # Check conv1 has conv, bn, activ
     conv1 = body.conv1
-    if not (hasattr(conv1, 'conv') and hasattr(conv1, 'bn') and hasattr(conv1, 'activ')):
+    if not (
+        hasattr(conv1, "conv") and hasattr(conv1, "bn") and hasattr(conv1, "activ")
+    ):
         return False
 
     # Check conv2 - it should have conv, bn, and may or may not have activ
     conv2 = body.conv2
-    if not (hasattr(conv2, 'conv') and hasattr(conv2, 'bn')):
+    if not (hasattr(conv2, "conv") and hasattr(conv2, "bn")):
         return False
 
     # Check types for conv1 and conv2
-    if not isinstance(conv1.conv, nn.Conv2d) or not isinstance(conv1.bn, nn.BatchNorm2d):
+    if not isinstance(conv1.conv, nn.Conv2d) or not isinstance(
+        conv1.bn, nn.BatchNorm2d
+    ):
         return False
-    if not isinstance(conv2.conv, nn.Conv2d) or not isinstance(conv2.bn, nn.BatchNorm2d):
+    if not isinstance(conv2.conv, nn.Conv2d) or not isinstance(
+        conv2.bn, nn.BatchNorm2d
+    ):
         return False
 
     # If conv3 exists (bottleneck), validate it too
-    if hasattr(body, 'conv3'):
+    if hasattr(body, "conv3"):
         conv3 = body.conv3
-        if not (hasattr(conv3, 'conv') and hasattr(conv3, 'bn')):
+        if not (hasattr(conv3, "conv") and hasattr(conv3, "bn")):
             return False
-        if not isinstance(conv3.conv, nn.Conv2d) or not isinstance(conv3.bn, nn.BatchNorm2d):
+        if not isinstance(conv3.conv, nn.Conv2d) or not isinstance(
+            conv3.bn, nn.BatchNorm2d
+        ):
             return False
 
     if not isinstance(module.activ, nn.ReLU):
@@ -842,7 +947,7 @@ def _create_quant_resunit(
     # TODO: Implement QuantResUnitBottleneck for 3-conv case
 
     body = resunit.body
-    has_conv3 = hasattr(body, 'conv3')
+    has_conv3 = hasattr(body, "conv3")
 
     if has_conv3:
         # Bottleneck structure (3 convs) - not yet supported
@@ -864,7 +969,9 @@ def _create_quant_resunit(
 
     conv1_activation_quantizer = None
     if conv1_config.activation_quantizer is not None:
-        conv1_activation_quantizer = conv1_config.activation_quantizer.create_quantizer()
+        conv1_activation_quantizer = (
+            conv1_config.activation_quantizer.create_quantizer()
+        )
 
     conv1_bias_quantizer = None
     if conv1_config.bias_quantizer is not None:
@@ -883,7 +990,9 @@ def _create_quant_resunit(
 
     conv2_activation_quantizer = None
     if conv2_config.activation_quantizer is not None:
-        conv2_activation_quantizer = conv2_config.activation_quantizer.create_quantizer()
+        conv2_activation_quantizer = (
+            conv2_config.activation_quantizer.create_quantizer()
+        )
 
     conv2_bias_quantizer = None
     if conv2_config.bias_quantizer is not None:
@@ -921,7 +1030,9 @@ def _create_quant_linear(
         QuantLinear layer
     """
     # Create quantizers from config
-    weight_quantizer = _create_weight_quantizer(linear.weight, config.weight_quantizer, linear.out_features)
+    weight_quantizer = _create_weight_quantizer(
+        linear.weight, config.weight_quantizer, linear.out_features
+    )
 
     activation_quantizer = None
     if config.activation_quantizer is not None:
@@ -953,23 +1064,24 @@ def set_quantizers_to_mode(
     """
     for module in model.modules():
         if isinstance(module, BaseQuantizer):
-            if mode == 'calibration':
+            if mode == "calibration":
                 module.calibration_mode_(True)
                 module.enable()
-            elif mode == 'training':
+            elif mode == "training":
                 module.calibration_mode_(False)
                 module.enable()
                 module.train()
-            elif mode == 'eval':
+            elif mode == "eval":
                 module.calibration_mode_(False)
                 module.enable()
                 module.eval()
-            elif mode == 'disable':
+            elif mode == "disable":
                 module.disable()
-            elif mode == 'enable':
+            elif mode == "enable":
                 module.enable()
             else:
                 raise ValueError(f"Unknown mode: {mode}")
+
 
 def freeze_model_parameters(model: nn.Module) -> Dict[int, bool]:
     # start by storing the requires_grad state of each parameter in a dict
@@ -981,11 +1093,13 @@ def freeze_model_parameters(model: nn.Module) -> Dict[int, bool]:
 
     return param_states
 
+
 def unfreeze_model_parameters(model: nn.Module, param_states: Dict[int, bool]) -> None:
     # restore the requires_grad state of each parameter from the provided dict
     for param in model.parameters():
         if id(param) in param_states:
             param.requires_grad = param_states[id(param)]
+
 
 def freeze_quantizer_parameters(model: nn.Module) -> None:
     """
@@ -1095,7 +1209,9 @@ def set_optimizer_weight_decay_for_parameters(
         if not selected:
             continue
 
-        group["params"] = [param for param in group_params if id(param) not in target_ids]
+        group["params"] = [
+            param for param in group_params if id(param) not in target_ids
+        ]
 
         new_group = {key: value for key, value in group.items() if key != "params"}
         new_group["params"] = selected
@@ -1106,95 +1222,119 @@ def set_optimizer_weight_decay_for_parameters(
     for new_group in new_groups:
         optimizer.add_param_group(new_group)
 
-    optimizer.param_groups[:] = [group for group in optimizer.param_groups if group["params"]]
+    optimizer.param_groups[:] = [
+        group for group in optimizer.param_groups if group["params"]
+    ]
     return moved_total
 
 
-def count_quantized_layers(model: nn.Module, additional_hatorch_quantized_layers_class: list[HatorchQuantizedLayer] | None = None) -> Dict[str, int]:
+def count_quantized_layers(
+    model: nn.Module,
+    additional_hatorch_quantized_layers_class: (
+        list[HatorchQuantizedLayer] | None
+    ) = None,
+) -> Dict[str, int]:
     """
     Count the number of quantized layers in a model.
-    
+
     Args:
         model: Model to analyze
         additional_hatorch_quantized_layers_class: List of additional Hatorch quantized layer classes to count
-        
+
     Returns:
         Dictionary with counts of different quantized layer types
     """
     counts = {
-        'QuantConvBn2d': 0,
-        'QuantConvReLU2d': 0,
-        'QuantConvBnReLU2d': 0,
-        'QuantLinear': 0,
-        'QuantReLU': 0,
-        'QuantMaxPool2d': 0,
-        'QuantAveragePool2d': 0,
-        'QuantDropout': 0,
-        'Quantize': 0,
-        'Dequantize': 0,
-        'Quantizers': 0,
+        "QuantConvBn2d": 0,
+        "QuantConvReLU2d": 0,
+        "QuantConvBnReLU2d": 0,
+        "QuantLinear": 0,
+        "QuantReLU": 0,
+        "QuantMaxPool2d": 0,
+        "QuantAveragePool2d": 0,
+        "QuantDropout": 0,
+        "Quantize": 0,
+        "Dequantize": 0,
+        "Quantizers": 0,
     }
-    
+
     for module in model.modules():
         if isinstance(module, QuantConvBnReLU2d):
-            counts['QuantConvBnReLU2d'] += 1
+            counts["QuantConvBnReLU2d"] += 1
         elif isinstance(module, QuantConvBn2d):
-            counts['QuantConvBn2d'] += 1
+            counts["QuantConvBn2d"] += 1
         elif isinstance(module, QuantConvReLU2d):
-            counts['QuantConvReLU2d'] += 1
+            counts["QuantConvReLU2d"] += 1
         elif isinstance(module, QuantLinear):
-            counts['QuantLinear'] += 1
+            counts["QuantLinear"] += 1
         elif isinstance(module, QuantReLU):
-            counts['QuantReLU'] += 1
+            counts["QuantReLU"] += 1
         elif isinstance(module, QuantMaxPool2d):
-            counts['QuantMaxPool2d'] += 1
+            counts["QuantMaxPool2d"] += 1
         elif isinstance(module, QuantAveragePool2d):
-            counts['QuantAveragePool2d'] += 1
+            counts["QuantAveragePool2d"] += 1
         elif isinstance(module, QuantDropout):
-            counts['QuantDropout'] += 1
+            counts["QuantDropout"] += 1
         elif isinstance(module, Quantize):
-            counts['Quantize'] += 1
+            counts["Quantize"] += 1
         elif isinstance(module, Dequantize):
-            counts['Dequantize'] += 1
+            counts["Dequantize"] += 1
         elif isinstance(module, BaseQuantizer):
-            counts['Quantizers'] += 1
+            counts["Quantizers"] += 1
         else:
-            for layer_class in HATORCH_QUANTIZED_LAYERS_CLASS + (additional_hatorch_quantized_layers_class or []):
+            for layer_class in HATORCH_QUANTIZED_LAYERS_CLASS + (
+                additional_hatorch_quantized_layers_class or []
+            ):
                 if isinstance(module, HatorchQuantizedLayer):
                     if not layer_class.__name__ in counts:
                         counts[layer_class.__name__] = 0
                     counts[layer_class.__name__] += 1
                     break
-    
+
     return counts
 
 
-def print_quantization_summary(model: nn.Module, additional_hatorch_quantized_layers_class: list[HatorchQuantizedLayer] | None = None) -> None:
+def print_quantization_summary(
+    model: nn.Module,
+    additional_hatorch_quantized_layers_class: (
+        list[HatorchQuantizedLayer] | None
+    ) = None,
+) -> None:
     """
     Print a summary of quantization configuration in a model.
-    
+
     Args:
         model: Model to summarize
     """
     print("=" * 80)
     print("Quantization Summary")
     print("=" * 80)
-    
-    counts = count_quantized_layers(model, additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class)
+
+    counts = count_quantized_layers(
+        model,
+        additional_hatorch_quantized_layers_class=additional_hatorch_quantized_layers_class,
+    )
     print(f"\nQuantized Layers:")
     for layer_type, count in counts.items():
         print(f"  {layer_type}: {count}")
-    
+
     print(f"\nQuantizer Details:")
     print("-" * 80)
 
-    quantizable_types = tuple(HATORCH_QUANTIZED_LAYERS_CLASS + (additional_hatorch_quantized_layers_class or []))
-    
+    quantizable_types = tuple(
+        HATORCH_QUANTIZED_LAYERS_CLASS
+        + (additional_hatorch_quantized_layers_class or [])
+    )
+
     for name, module in model.named_modules():
-        if isinstance(module, (QuantConvBn2d, QuantConvReLU2d, QuantConvBnReLU2d, QuantLinear)):
+        if isinstance(
+            module, (QuantConvBn2d, QuantConvReLU2d, QuantConvBnReLU2d, QuantLinear)
+        ):
             print(f"\n{name} ({type(module).__name__}):")
             print(f"  Weight quantizer: {type(module.weight_quantizer).__name__}")
-            print(f"  Activation quantizer: {type(module.activation_quantizer).__name__}")
+            print(
+                f"  Activation quantizer: {type(module.activation_quantizer).__name__}"
+            )
             print(f"  Bias quantizer: {type(module.bias_quantizer).__name__}")
         elif isinstance(module, quantizable_types):
             print(f"\n{name} ({type(module).__name__}):")
@@ -1202,7 +1342,7 @@ def print_quantization_summary(model: nn.Module, additional_hatorch_quantized_la
                 if isinstance(getattr(module, attr), BaseQuantizer):
                     quantizer = getattr(module, attr)
                     print(f"  {attr}: {type(quantizer).__name__}")
-    
+
     print("=" * 80)
 
 
@@ -1217,10 +1357,10 @@ def set_scale_approximation(
 ) -> int:
     """
     Dynamically change the scale approximation method for all LSQ quantizers in a model.
-    
+
     This is useful for switching between training (no approximation) and inference
     (power-of-two or fixed-point approximation) modes.
-    
+
     Args:
         model: Model containing LSQ quantizers
         approximation: Scale approximation method to set
@@ -1231,25 +1371,29 @@ def set_scale_approximation(
             when input/dataset quantization is an external deployment boundary.
         skip_output_scale: Keep the last weight quantizer exact. Use this when
             final output scaling is outside the deployed accelerator graph.
-        
+
     Example:
         >>> # Train with exact scales
         >>> set_scale_approximation(model, ScaleApproximation.NONE)
         >>> trainer.train()
-        >>> 
+        >>>
         >>> # Evaluate with power-of-two approximation
         >>> set_scale_approximation(model, ScaleApproximation.POWER_OF_TWO)
         >>> trainer.evaluate()
-        >>> 
+        >>>
         >>> # Deploy with fixed-point approximation (8 fractional bits)
         >>> set_scale_approximation(model, ScaleApproximation.FIXED_POINT, fixed_point_bits=8)
     """
     if weights_only and activations_only:
         raise ValueError("Cannot specify both weights_only and activations_only")
-    
+
     updated = 0
-    first_activation = _first_lsq_activation_quantizer(model) if skip_first_activation else None
-    output_scale_quantizer = _last_lsq_weight_quantizer(model) if skip_output_scale else None
+    first_activation = (
+        _first_lsq_activation_quantizer(model) if skip_first_activation else None
+    )
+    output_scale_quantizer = (
+        _last_lsq_weight_quantizer(model) if skip_output_scale else None
+    )
     for module in model.modules():
         if isinstance(module, LsqUniformQuantizer):
             # Filter based on quantizer type
@@ -1260,13 +1404,15 @@ def set_scale_approximation(
             if module is first_activation or module is output_scale_quantizer:
                 module.scale_approximation = ScaleApproximation.NONE
                 continue
-            
+
             # Update approximation settings
             module.scale_approximation = approximation
             if fixed_point_bits is not None:
                 module.fixed_point_bits = fixed_point_bits
             updated += 1
-        elif isinstance(module, QuantResUnit) and not (weights_only or activations_only):
+        elif isinstance(module, QuantResUnit) and not (
+            weights_only or activations_only
+        ):
             module.scale_approximation = approximation
             if fixed_point_bits is not None:
                 module.fixed_point_bits = fixed_point_bits
@@ -1341,8 +1487,12 @@ def freeze_lsq_scales_and_set_power_of_two(
     if weights_only and activations_only:
         raise ValueError("Cannot specify both weights_only and activations_only")
 
-    first_activation = _first_lsq_activation_quantizer(model) if skip_first_activation else None
-    output_scale_quantizer = _last_lsq_weight_quantizer(model) if skip_output_scale else None
+    first_activation = (
+        _first_lsq_activation_quantizer(model) if skip_first_activation else None
+    )
+    output_scale_quantizer = (
+        _last_lsq_weight_quantizer(model) if skip_output_scale else None
+    )
     for module in model.modules():
         if not isinstance(module, LsqUniformQuantizer):
             continue

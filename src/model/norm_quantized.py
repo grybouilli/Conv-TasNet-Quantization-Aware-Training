@@ -139,3 +139,227 @@ class QuantGlobalLayerNorm(HatorchQuantizedLayer[GlobalLayerNorm]):
             quant_globallayernorm.beta.copy_(layer.beta)
 
         return quant_globallayernorm
+
+from typing import Self
+import torch.nn.functional as F
+
+
+class QuantBatchNorm1d(HatorchQuantizedLayer[nn.BatchNorm1d]):
+    """
+    Quantized version of nn.BatchNorm1d.
+
+    Accepts QuantTensor inputs of shape (N, C) or (N, C, L) and returns a
+    QuantTensor. The input activation and the affine parameters (gamma/beta)
+    are fake-quantized; running statistics are kept in full precision.
+
+    State-dict compatible with nn.BatchNorm1d (weight, bias, running_mean,
+    running_var, num_batches_tracked).
+    """
+
+    layer_non_quantized_class = nn.BatchNorm1d
+
+    def __init__(
+        self,
+        num_features: int,
+        eps: float = 1e-5,
+        momentum: float | None = 0.1,
+        affine: bool = True,
+        track_running_stats: bool = True,
+        activation_quantizer: BaseQuantizer | None = None,
+        gamma_weight_quantizer: BaseQuantizer | None = None,
+        beta_weight_quantizer: BaseQuantizer | None = None,
+    ) -> None:
+        super().__init__()
+
+        self.activation_quantizer = (
+            activation_quantizer
+            if activation_quantizer is not None
+            else IdentityQuantizer()
+        )
+        self.gamma_weight_quantizer = (
+            gamma_weight_quantizer
+            if gamma_weight_quantizer is not None
+            else IdentityQuantizer()
+        )
+        self.beta_weight_quantizer = (
+            beta_weight_quantizer
+            if beta_weight_quantizer is not None
+            else IdentityQuantizer()
+        )
+
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        self.track_running_stats = track_running_stats
+
+        if affine:
+            self.weight = nn.Parameter(torch.ones(num_features))
+            self.bias = nn.Parameter(torch.zeros(num_features))
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+        if track_running_stats:
+            self.register_buffer("running_mean", torch.zeros(num_features))
+            self.register_buffer("running_var", torch.ones(num_features))
+            self.register_buffer(
+                "num_batches_tracked", torch.tensor(0, dtype=torch.long)
+            )
+        else:
+            self.register_buffer("running_mean", None)
+            self.register_buffer("running_var", None)
+            self.register_buffer("num_batches_tracked", None)
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _check_input_dim(x: torch.Tensor) -> None:
+        if x.dim() not in (2, 3):
+            raise ValueError(f"expected 2D or 3D input (got {x.dim()}D input)")
+
+    def _momentum_factor(self) -> float:
+        """Same momentum logic as torch's _BatchNorm (supports momentum=None)."""
+        factor = 0.0 if self.momentum is None else self.momentum
+        if self.training and self.track_running_stats:
+            assert self.num_batches_tracked is not None
+            self.num_batches_tracked.add_(1)
+            if self.momentum is None:  # cumulative moving average
+                factor = 1.0 / float(self.num_batches_tracked.item())
+        return factor
+
+    def _use_batch_stats(self) -> bool:
+        if self.training:
+            return True
+        return self.running_mean is None and self.running_var is None
+
+    # ------------------------------------------------------------------ #
+    # Forward paths
+    # ------------------------------------------------------------------ #
+    def forward_hatorch(self, x: QuantTensor) -> QuantTensor:
+        self._check_input_dim(x.dequantized_value)
+
+        # Quantize input activation
+        quant_input_qt = self.activation_quantizer(x.dequantized_value)
+        value = quant_input_qt.dequantized_value
+
+        # Quantize affine parameters (viewed as (1, C, 1) so per-channel
+        # quantizers created with channels_axis=1, input_dim=3 apply)
+        gamma = beta = None
+        if self.affine:
+            gamma_qt: QuantTensor = self.gamma_weight_quantizer(
+                self.weight.view(1, -1, 1)
+            )
+            beta_qt: QuantTensor = self.beta_weight_quantizer(
+                self.bias.view(1, -1, 1)
+            )
+            gamma = gamma_qt.dequantized_value.reshape(-1)
+            beta = beta_qt.dequantized_value.reshape(-1)
+
+        use_batch_stats = self._use_batch_stats()
+        output = F.batch_norm(
+            value,
+            # Only pass running stats when they should be used / updated
+            self.running_mean if (not self.training or self.track_running_stats) else None,
+            self.running_var if (not self.training or self.track_running_stats) else None,
+            gamma,
+            beta,
+            use_batch_stats,
+            self._momentum_factor(),
+            self.eps,
+        )
+
+        return QuantTensor(
+            value=output,
+            scale=torch.ones(1, device=output.device, dtype=output.dtype),
+            zero_point=None,
+            bit_width=quant_input_qt.bit_width,  # Use input bit width for output
+            signed=True,
+        )
+
+    def forward_onnx(self, x: torch.Tensor) -> torch.Tensor:
+        self._check_input_dim(x)
+
+        quant_input = self.activation_quantizer.onnx_export_forward(x)
+
+        gamma = beta = None
+        if self.affine:
+            gamma = self.gamma_weight_quantizer.onnx_export_forward(
+                self.weight.view(1, -1, 1)
+            ).reshape(-1)
+            beta = self.beta_weight_quantizer.onnx_export_forward(
+                self.bias.view(1, -1, 1)
+            ).reshape(-1)
+
+        # Export always uses running stats (inference), producing a
+        # BatchNormalization node that ONNX Runtime can fuse/optimize.
+        return F.batch_norm(
+            quant_input,
+            self.running_mean,
+            self.running_var,
+            gamma,
+            beta,
+            False,
+            0.0,
+            self.eps,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Conversion
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def from_non_quantized_layer(
+        cls,
+        layer: nn.BatchNorm1d,
+        layer_config: LayerQuantConfig,
+    ) -> Self:
+        """
+        Create a QuantBatchNorm1d from an existing nn.BatchNorm1d layer.
+
+        Copies parameters, running statistics and configuration.
+
+        Args:
+            layer: Original BatchNorm1d layer
+            layer_config: Quantization config (activation / weight quantizers)
+
+        Returns:
+            QuantBatchNorm1d layer with copied parameters and buffers
+        """
+        activation_quantizer = None
+        if layer_config.activation_quantizer is not None:
+            activation_quantizer = layer_config.activation_quantizer.create_quantizer()
+
+        gamma_weight_quantizer = None
+        beta_weight_quantizer = None
+        if layer.affine and layer_config.weight_quantizer is not None:
+            gamma_weight_quantizer = layer_config.weight_quantizer.create_quantizer(
+                layer.num_features, channels_axis=1, input_dim=3
+            )
+            beta_weight_quantizer = layer_config.weight_quantizer.create_quantizer(
+                layer.num_features, channels_axis=1, input_dim=3
+            )
+
+        quant_bn = cls(
+            num_features=layer.num_features,
+            eps=layer.eps,
+            momentum=layer.momentum,
+            affine=layer.affine,
+            track_running_stats=layer.track_running_stats,
+            activation_quantizer=activation_quantizer,
+            gamma_weight_quantizer=gamma_weight_quantizer,
+            beta_weight_quantizer=beta_weight_quantizer,
+        )
+
+        # Copy parameters and buffers
+        with torch.no_grad():
+            if layer.affine:
+                quant_bn.weight.copy_(layer.weight)
+                quant_bn.bias.copy_(layer.bias)
+            if layer.track_running_stats:
+                quant_bn.running_mean.copy_(layer.running_mean)
+                quant_bn.running_var.copy_(layer.running_var)
+                quant_bn.num_batches_tracked.copy_(layer.num_batches_tracked)
+
+        quant_bn.train(layer.training)
+        return quant_bn

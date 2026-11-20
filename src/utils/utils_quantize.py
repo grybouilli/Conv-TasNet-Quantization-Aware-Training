@@ -10,8 +10,7 @@ from hatorch.transforms.config import (
     mixed_precision_config,
 )
 
-from model.norm_quantized import QuantGlobalLayerNorm
-
+from model.norm_quantized import QuantGlobalLayerNorm, QuantBatchNorm1d
 
 def generate_layers_recursively(
     module: nn.Module, prefix: str, layers_name: list[str]
@@ -302,6 +301,6 @@ def quantize_model(
         example_args=example_args,
         use_wrapper=True,
         replace_quantizable_operators_using_tracing=False,
-        additional_hatorch_quantized_layers_class=[QuantGlobalLayerNorm],
+        additional_hatorch_quantized_layers_class=[QuantBatchNorm1d],
     )
     return quantized_model

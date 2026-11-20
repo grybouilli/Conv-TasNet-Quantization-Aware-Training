@@ -47,7 +47,7 @@ CHECKPOINT_FILENAME: str | None = None
 # CHECKPOINT_FILENAME = "epoch=2-step=3174.ckpt"
 
 
-def train(conf: Conf, model_archi: str, quantization_config_name: str):
+def train(conf: Conf, quantization_config_name: str):
 
     if conf.training.seed:
         print(f"Setting seed to {conf.training.seed}")
@@ -193,25 +193,33 @@ def train(conf: Conf, model_archi: str, quantization_config_name: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print(__doc__)
-        sys.exit(1)
+    from argparse import ArgumentParser, BooleanOptionalAction
 
-    model_archi = sys.argv[1]
+    parser = ArgumentParser()
+    parser.add_argument("config", type=str)
+    parser.add_argument("quantize", type=str)
+    parser.add_argument("--config_dir", type=str, default=".")
+    parser.add_argument("--resume_from", type=str, default=None)
+    parser.add_argument("--with_l1", action=BooleanOptionalAction, default=False)
+
+    args = parser.parse_args()
+
+    model_archi = args.config
+    resume_from = args.resume_from
+
     print(f"Using model architecture: {model_archi}")
 
-    quantize_config_name = sys.argv[2]
-    validate_quantization_config_names([quantize_config_name])
-    print(f"Using quantization config: {quantize_config_name}")
-
-    CONF_PATH = f"conf_{model_archi}.yml"
+    CONF_PATH = os.path.join(args.config_dir, f"conf_{model_archi}.yml")
     with open(CONF_PATH) as f:
         conf_data = yaml.safe_load(f)
 
     conf = Conf(conf_data)
 
+    quantize_config_name = args.quantize
+    validate_quantization_config_names([quantize_config_name])
+    print(f"Using quantization config: {quantize_config_name}")
+
     train(
         conf=conf,
-        model_archi=model_archi,
         quantization_config_name=quantize_config_name,
     )
