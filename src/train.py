@@ -22,7 +22,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchmetrics.audio import PermutationInvariantTraining
-
+import torch.nn.functional as F
 from model.convtasnet import ConvTasNet
 from utils.conf import Conf
 from utils.lightning_module import ConvTasNetLightningModule
@@ -33,7 +33,44 @@ devices = "auto"
 strategy = "auto"
 
 
-def train(conf: Conf, resume_from: None | str = None):
+class PIT_SISDR_L1_Loss(torch.nn.Module):
+    @staticmethod
+    def _create_loss(sisdr_ratio=0.9, l1_ratio=0.2):
+        return lambda est, target: sisdr_ratio * neg_sisdr(est, target) + l1_ratio * (
+            est - target
+        ).abs().mean(dim=-1)
+
+    def __init__(self, sisdr_ratio=0.9, l1_ratio=0.2):
+        super().__init__()
+
+        self.pit_sisdr_l1 = PermutationInvariantTraining(
+            self._create_loss(sisdr_ratio=sisdr_ratio, l1_ratio=l1_ratio),
+            eval_func="min",
+        )
+        
+        self._pit_sisdr = PermutationInvariantTraining(
+            neg_sisdr,
+            eval_func="min",
+        )
+
+        self._pit_l1 = PermutationInvariantTraining(
+            lambda est, target : (est - target).abs().mean(dim=-1),
+            eval_func="min",
+        )
+        self.sisdr_ratio = sisdr_ratio
+        self.l1_ratio = l1_ratio
+
+    def forward(self, est: torch.Tensor, target: torch.Tensor):
+        return self.pit_sisdr_l1(est, target)
+    
+    def pit_sisdr(self, est, target):
+        return self._pit_sisdr(est, target)
+    
+    def pit_l1(self, est, target):
+        return self._pit_l1(est, target)
+
+
+def train(conf: Conf, resume_from: None | str = None, with_l1: bool = False):
 
     if conf.training.seed:
         print(f"Setting seed to {conf.training.seed}")
@@ -46,7 +83,7 @@ def train(conf: Conf, resume_from: None | str = None):
     torch.backends.cudnn.benchmark = True
 
     model: ConvTasNet = construct_model(conf=conf)
-    model.compile()          # in-place: state_dict keys keep their names (no `_orig_mod.` prefix)
+    model.compile()  # in-place: state_dict keys keep their names (no `_orig_mod.` prefix)
 
     optimizer = Adam(
         model.parameters(),
@@ -63,9 +100,14 @@ def train(conf: Conf, resume_from: None | str = None):
     pit_scale_invariant_signal_distortion_ratio = PermutationInvariantTraining(
         neg_sisdr, eval_func="min"
     )
+    pit_sisdr_with_l1 = PIT_SISDR_L1_Loss(0.446, 1.0)
     module = ConvTasNetLightningModule(
         model=model,
-        loss=pit_scale_invariant_signal_distortion_ratio,
+        loss=(
+            pit_scale_invariant_signal_distortion_ratio
+            if not with_l1
+            else pit_sisdr_with_l1
+        ),
         optimizer=optimizer,
         scheduler=scheduler,
     )
@@ -116,15 +158,16 @@ def train(conf: Conf, resume_from: None | str = None):
 
 
 if __name__ == "__main__":
-    from argparse import ArgumentParser
+    from argparse import ArgumentParser, BooleanOptionalAction
+
     parser = ArgumentParser()
     parser.add_argument("config", type=str)
     parser.add_argument("--config_dir", type=str, default=".")
     parser.add_argument("--resume_from", type=str, default=None)
+    parser.add_argument("--with_l1", action=BooleanOptionalAction, default=False)
 
     args = parser.parse_args()
 
-    
     model_archi = args.config
     resume_from = args.resume_from
 
@@ -136,4 +179,4 @@ if __name__ == "__main__":
 
     conf = Conf(conf_data)
 
-    train(conf=conf, resume_from=resume_from)
+    train(conf=conf, resume_from=resume_from, with_l1=args.with_l1)

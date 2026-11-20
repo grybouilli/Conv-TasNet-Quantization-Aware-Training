@@ -24,9 +24,12 @@ class ConvTasNetLightningModule(pl.LightningModule):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.model(inputs)
 
+    def _pass_to_model(self, inputs, targets ):
+        return self(inputs)
+
     def common_step(self, batch, batch_idx):
         inputs, targets = batch
-        est_targets = self(inputs)
+        est_targets = self._pass_to_model(inputs, targets)
         loss = self.loss(est_targets, targets)
         return loss
 
@@ -46,13 +49,25 @@ class ConvTasNetLightningModule(pl.LightningModule):
         self.log("test_loss", loss, on_epoch=True, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
-        loss = self.common_step(batch, batch_idx)
+        # loss = self.common_step(batch, batch_idx)
+        inputs, targets = batch
+        est_targets = self._pass_to_model(inputs, targets)
+        loss = self.loss(est_targets, targets)
+
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
         self.log("memory_allocated (MB)", torch.cuda.memory_allocated() / 1024**2)
-        # print(f"Validation step {batch_idx} - loss: {loss.item():.4f}, memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
-        # print(print(torch.cuda.memory_summary(device=None, abbreviated=False)))
-        # for name, param in self.model.get_loggable_weights():
-        #     self.logger.experiment.add_histogram(name, param, global_step=self.current_epoch)
+
+        if hasattr(self.loss, "pit_sisdr") and callable(self.loss.pit_sisdr):
+            sisdr  = self.loss.pit_sisdr(est_targets, targets)
+            self.log("val_sisdr", sisdr, on_epoch=True, prog_bar=True)
+        if hasattr(self.loss, "pit_l1") and callable(self.loss.pit_l1):
+            sisdr  = self.loss.pit_l1(est_targets, targets)
+            self.log("val_l1", sisdr, on_epoch=True, prog_bar=True)
+
+    # print(f"Validation step {batch_idx} - loss: {loss.item():.4f}, memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+    # print(print(torch.cuda.memory_summary(device=None, abbreviated=False)))
+    # for name, param in self.model.get_loggable_weights():
+    #     self.logger.experiment.add_histogram(name, param, global_step=self.current_epoch)
 
     def configure_model(self):
         self.model = torch.compile(self.model)
