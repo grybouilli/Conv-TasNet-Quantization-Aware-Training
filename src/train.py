@@ -93,10 +93,9 @@ def train(conf: Conf, resume_from: None | str = None):
     pit_sisdr_with_l1 = PIT_SISDR_L1_Loss(sisdr_ratio, l1_ratio)
     module = ConvTasNetLightningModule(
         model=model,
-        loss=(
-            pit_scale_invariant_signal_distortion_ratio
+        loss=(pit_sisdr_with_l1
             if conf.training.with_l1 is not None and conf.training.with_l1
-            else pit_sisdr_with_l1
+            else pit_scale_invariant_signal_distortion_ratio
         ),
         optimizer=optimizer,
         scheduler=scheduler,
