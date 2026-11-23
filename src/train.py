@@ -179,4 +179,19 @@ if __name__ == "__main__":
 
     conf = Conf(conf_data)
 
-    train(conf=conf, resume_from=resume_from, with_l1=args.with_l1)
+    def train_loop():
+        while True:
+            try:
+                train(conf=conf, resume_from=resume_from, with_l1=args.with_l1)
+                break
+            except torch.cuda.OutOfMemoryError as e:
+                print(f"Caught a RuntimeError: {e}")
+                conf.training.batch_size = conf.training.batch_size // 2
+                torch.cuda.empty_cache()
+
+                if conf.training.batch_size == 0:
+                    print(f"Reached batch size = 0")
+                    break
+                print(f"Retrying with batch size: {conf.training.batch_size}")
+
+    train_loop()
