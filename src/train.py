@@ -40,8 +40,8 @@ strategy = "auto"
 class PIT_SISDR_L1_Loss(torch.nn.Module):
     def __init__(self, sisdr_ratio=0.9, l1_ratio=0.2):
         super().__init__()
-        self.sisdr_ratio = sisdr_ratio
-        self.l1_ratio = l1_ratio
+        self.sisdr_ratio = sisdr_ratio if sisdr_ratio is not None else 1.0
+        self.l1_ratio = l1_ratio if l1_ratio is not None else 1.0
 
     def forward(self, est: torch.Tensor, target: torch.Tensor):
         sisdr, l1 = self._terms(est, target)
@@ -58,7 +58,7 @@ class PIT_SISDR_L1_Loss(torch.nn.Module):
         return l_sisdr, l_l1
 
 
-def train(conf: Conf, resume_from: None | str = None, with_l1: bool = False):
+def train(conf: Conf, resume_from: None | str = None):
 
     if conf.training.seed:
         print(f"Setting seed to {conf.training.seed}")
@@ -88,12 +88,14 @@ def train(conf: Conf, resume_from: None | str = None, with_l1: bool = False):
     pit_scale_invariant_signal_distortion_ratio = PermutationInvariantTraining(
         neg_sisdr, eval_func="min"
     )
-    pit_sisdr_with_l1 = PIT_SISDR_L1_Loss(0.446, 1.0)
+    sisdr_ratio, l1_ratio = conf.training.sisdr_weight, conf.training.l1_weight
+    print(f"sisdr_ratio, l1_ratio = {sisdr_ratio}, {l1_ratio}")
+    pit_sisdr_with_l1 = PIT_SISDR_L1_Loss(sisdr_ratio, l1_ratio)
     module = ConvTasNetLightningModule(
         model=model,
         loss=(
             pit_scale_invariant_signal_distortion_ratio
-            if not with_l1
+            if conf.training.with_l1 is not None and conf.training.with_l1
             else pit_sisdr_with_l1
         ),
         optimizer=optimizer,
@@ -133,6 +135,10 @@ def train(conf: Conf, resume_from: None | str = None, with_l1: bool = False):
         # It may slow down training to log on every single batch. By default, Lightning logs every 50 rows, or 50 training steps
         # log_every_n_steps=2,
     )
+    trainer_exp_path = trainer.log_dir
+    conf_path = os.path.join(trainer_exp_path, "conf.yml")
+    with open(conf_path, "w") as outfile:
+        yaml.safe_dump(conf_data, outfile)
     trainer.fit(
         module,
         train_dataloaders=train_loader,
@@ -140,6 +146,9 @@ def train(conf: Conf, resume_from: None | str = None, with_l1: bool = False):
         ckpt_path=resume_from,
     )
 
+    export_path = os.path.join(trainer_exp_path, "compiled_model.pth")
+    torch.save(module.model.state_dict(), export_path)
+    print(f"Compiled model saved to {export_path}")
     export_path = os.path.join(exp_dir, "compiled_model.pth")
     torch.save(module.model.state_dict(), export_path)
     print(f"Compiled model saved to {export_path}")
@@ -152,7 +161,6 @@ if __name__ == "__main__":
     parser.add_argument("config", type=str)
     parser.add_argument("--config_dir", type=str, default=".")
     parser.add_argument("--resume_from", type=str, default=None)
-    parser.add_argument("--with_l1", action=BooleanOptionalAction, default=False)
 
     args = parser.parse_args()
 
@@ -170,7 +178,7 @@ if __name__ == "__main__":
     def train_loop():
         while True:
             try:
-                train(conf=conf, resume_from=resume_from, with_l1=args.with_l1)
+                train(conf=conf, resume_from=resume_from)
                 break
             except torch.cuda.OutOfMemoryError as e:
                 print(f"Caught a RuntimeError: {e}")
