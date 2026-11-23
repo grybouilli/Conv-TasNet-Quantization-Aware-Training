@@ -22,6 +22,10 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchmetrics.audio import PermutationInvariantTraining
+from torchmetrics.functional.audio import (
+    permutation_invariant_training,
+    pit_permutate,
+)
 import torch.nn.functional as F
 from model.convtasnet import ConvTasNet
 from utils.conf import Conf
@@ -34,40 +38,24 @@ strategy = "auto"
 
 
 class PIT_SISDR_L1_Loss(torch.nn.Module):
-    @staticmethod
-    def _create_loss(sisdr_ratio=0.9, l1_ratio=0.2):
-        return lambda est, target: sisdr_ratio * neg_sisdr(est, target) + l1_ratio * (
-            est - target
-        ).abs().mean(dim=-1)
-
     def __init__(self, sisdr_ratio=0.9, l1_ratio=0.2):
         super().__init__()
-
-        self.pit_sisdr_l1 = PermutationInvariantTraining(
-            self._create_loss(sisdr_ratio=sisdr_ratio, l1_ratio=l1_ratio),
-            eval_func="min",
-        )
-        
-        self._pit_sisdr = PermutationInvariantTraining(
-            neg_sisdr,
-            eval_func="min",
-        )
-
-        self._pit_l1 = PermutationInvariantTraining(
-            lambda est, target : (est - target).abs().mean(dim=-1),
-            eval_func="min",
-        )
         self.sisdr_ratio = sisdr_ratio
         self.l1_ratio = l1_ratio
 
     def forward(self, est: torch.Tensor, target: torch.Tensor):
-        return self.pit_sisdr_l1(est, target)
-    
-    def pit_sisdr(self, est, target):
-        return self._pit_sisdr(est, target)
-    
-    def pit_l1(self, est, target):
-        return self._pit_l1(est, target)
+        sisdr, l1 = self._terms(est, target)
+        return self.sisdr_ratio * sisdr + self.l1_ratio * l1
+
+    def _terms(self, est, target):
+        # choose ONE permutation (SI-SDR) and apply it to both terms
+        _, perm = permutation_invariant_training(
+            est, target, neg_sisdr, eval_func="min"
+        )
+        est_p = pit_permutate(est, perm)
+        l_sisdr = neg_sisdr(est_p.flatten(0, 1), target.flatten(0, 1)).mean()
+        l_l1 = (est_p - target).abs().mean()
+        return l_sisdr, l_l1
 
 
 def train(conf: Conf, resume_from: None | str = None, with_l1: bool = False):

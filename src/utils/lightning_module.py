@@ -57,12 +57,10 @@ class ConvTasNetLightningModule(pl.LightningModule):
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
         self.log("memory_allocated (MB)", torch.cuda.memory_allocated() / 1024**2)
 
-        if hasattr(self.loss, "pit_sisdr") and callable(self.loss.pit_sisdr):
-            sisdr  = self.loss.pit_sisdr(est_targets, targets)
+        if hasattr(self.loss, "_terms") and callable(self.loss._terms):
+            sisdr, l1  = self.loss._terms(est_targets, targets)
             self.log("val_sisdr", sisdr, on_epoch=True, prog_bar=True)
-        if hasattr(self.loss, "pit_l1") and callable(self.loss.pit_l1):
-            sisdr  = self.loss.pit_l1(est_targets, targets)
-            self.log("val_l1", sisdr, on_epoch=True, prog_bar=True)
+            self.log("val_l1", l1, on_epoch=True, prog_bar=True)
 
     # print(f"Validation step {batch_idx} - loss: {loss.item():.4f}, memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
     # print(print(torch.cuda.memory_summary(device=None, abbreviated=False)))
