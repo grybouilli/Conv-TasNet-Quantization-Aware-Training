@@ -137,15 +137,14 @@ def train(conf: Conf, resume_from: None | str = None):
     )
     trainer_exp_path = trainer.log_dir
     conf_path = os.path.join(trainer_exp_path, "conf.yml")
-    with open(conf_path, "w") as outfile:
-        yaml.safe_dump(conf_data, outfile)
     trainer.fit(
         module,
         train_dataloaders=train_loader,
         val_dataloaders=val_loader,
         ckpt_path=resume_from,
     )
-
+    with open(conf_path, "w") as outfile:
+        yaml.safe_dump(conf_data, outfile)
     export_path = os.path.join(trainer_exp_path, "compiled_model.pth")
     torch.save(module.model.state_dict(), export_path)
     print(f"Compiled model saved to {export_path}")
