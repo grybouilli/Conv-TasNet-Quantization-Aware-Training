@@ -29,9 +29,10 @@ class TrainingConf:
     half_lr: bool
     early_stop: bool
     seed: int | None
-    with_l1: None | bool
-    sisdr_weight: float | None
-    l1_weight: float | None
+    with_l1: None | bool = None
+    sisdr_weight: float | None = None
+    l1_weight: float | None = None
+    baseline : bool = False
 
 
 @dataclass

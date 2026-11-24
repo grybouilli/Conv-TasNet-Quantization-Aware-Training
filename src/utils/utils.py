@@ -136,6 +136,7 @@ def construct_model(conf: Conf) -> ConvTasNet:
         nb_layers=conf.masknet.nb_layers,
         nb_conv_blocks_per_layer=conf.masknet.nb_conv_blocks_per_layer,
         norm_type=conf.masknet.norm_type,
+        baseline=conf.training.baseline
     )
     return model
 

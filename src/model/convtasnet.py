@@ -162,6 +162,7 @@ class ConvolutionalBlock1D(nn.Module):
         padding: int,
         dilation: int,
         norm_type: NormType,
+        baseline: bool = False,
     ):
         super().__init__()
         # TODO: causal padding
@@ -221,6 +222,8 @@ class ConvolutionalBlock1D(nn.Module):
         self.K = kernel_size
         self.D = dilation
 
+        self._baseline_mode = baseline
+
     def forward(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -231,18 +234,32 @@ class ConvolutionalBlock1D(nn.Module):
             output: [Batch, B, L]
             skip:   [Batch, Sc, L]
         """
-        output = self.conv1d(input)
-        output = self.normalization1(output)
-        output = self.nonlinearity1(output)
+        if self._baseline_mode:
+            output = self.conv1d(input)
+            output = self.nonlinearity1(output)
+            output = self.normalization1(output)
 
-        output = F.pad(output, ((self.K - 1) * self.D, 0))
-        output = self.dconv(output)
+            output = F.pad(output, ((self.K - 1) * self.D, 0))
+            output = self.dconv(output)
 
-        output = self.normalization2(output)
-        output = self.nonlinearity2(output)
+            output = self.nonlinearity2(output)
+            output = self.normalization2(output)
 
-        skip = self.skip_conv1d(output)
-        residual = self.out_conv1d(output)
+            skip = self.skip_conv1d(output)
+            residual = self.out_conv1d(output)
+        else:
+            output = self.conv1d(input)
+            output = self.normalization1(output)
+            output = self.nonlinearity1(output)
+
+            output = F.pad(output, ((self.K - 1) * self.D, 0))
+            output = self.dconv(output)
+
+            output = self.normalization2(output)
+            output = self.nonlinearity2(output)
+
+            skip = self.skip_conv1d(output)
+            residual = self.out_conv1d(output)
 
         # TODO: we put this here instead of in the TCN which may be unconventional
         output = input + residual
@@ -293,6 +310,7 @@ class TCN(nn.Module):
         nb_layers: int = 3,
         nb_conv_blocks_per_layer: int = 8,
         norm_type: NormType = NormType.global_layer_norm,
+        baseline: bool = False,
     ):
         super().__init__()
 
@@ -335,6 +353,7 @@ class TCN(nn.Module):
                     padding=0,
                     dilation=dilation,
                     norm_type=norm_type,
+                    baseline=baseline,
                 )
 
                 self.layers.append(conv_block)
@@ -444,6 +463,7 @@ class ConvTasNet(nn.Module):
         nb_layers: int = 3,
         nb_conv_blocks_per_layer: int = 8,
         norm_type: NormType = NormType.global_layer_norm,
+        baseline: bool = False,
     ):
         super().__init__()
         self.enc_dim = enc_dim
@@ -473,6 +493,7 @@ class ConvTasNet(nn.Module):
             nb_layers=nb_layers,
             nb_conv_blocks_per_layer=nb_conv_blocks_per_layer,
             norm_type=norm_type,
+            baseline=baseline,
         )
 
         self.decoder = Decoder(
@@ -480,6 +501,8 @@ class ConvTasNet(nn.Module):
             kernel_size=encoder_kernel_size,
             stride=self.stride,
         )
+        if baseline:
+            print("Using paper architecture")
 
     @property
     def receptive_field(self) -> int:
