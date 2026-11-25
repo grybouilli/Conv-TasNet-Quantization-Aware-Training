@@ -109,7 +109,6 @@ class Decoder(nn.Module):
         self.stride = stride
         self.kernel_size = kernel_size
 
-        # TODO: is the output really 2?
         self.convTranspose1d = nn.ConvTranspose1d(
             in_channels=enc_dim,
             out_channels=1,
@@ -223,6 +222,13 @@ class ConvolutionalBlock1D(nn.Module):
         self.D = dilation
 
         self._baseline_mode = baseline
+        if norm_type == NormType.global_layer_norm:
+            # Non-causal (paper, gLN): symmetric padding
+            p = (kernel_size - 1) * dilation // 2
+            self._pad = (p, p)
+        else:
+            # Causal (cLN etc.): left-only padding
+            self._pad = ((kernel_size - 1) * dilation, 0)
 
     def forward(self, input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -234,32 +240,31 @@ class ConvolutionalBlock1D(nn.Module):
             output: [Batch, B, L]
             skip:   [Batch, Sc, L]
         """
+
         if self._baseline_mode:
             output = self.conv1d(input)
             output = self.nonlinearity1(output)
             output = self.normalization1(output)
 
-            output = F.pad(output, ((self.K - 1) * self.D, 0))
+            output = F.pad(output, self._pad)
             output = self.dconv(output)
 
             output = self.nonlinearity2(output)
             output = self.normalization2(output)
 
-            skip = self.skip_conv1d(output)
-            residual = self.out_conv1d(output)
         else:
             output = self.conv1d(input)
             output = self.normalization1(output)
             output = self.nonlinearity1(output)
 
-            output = F.pad(output, ((self.K - 1) * self.D, 0))
+            output = F.pad(output, self._pad)
             output = self.dconv(output)
 
             output = self.normalization2(output)
             output = self.nonlinearity2(output)
 
-            skip = self.skip_conv1d(output)
-            residual = self.out_conv1d(output)
+        skip = self.skip_conv1d(output)
+        residual = self.out_conv1d(output)
 
         # TODO: we put this here instead of in the TCN which may be unconventional
         output = input + residual
@@ -503,6 +508,7 @@ class ConvTasNet(nn.Module):
         )
         if baseline:
             print("Using paper architecture")
+        self._baseline_mode = baseline
 
     @property
     def receptive_field(self) -> int:
@@ -510,6 +516,16 @@ class ConvTasNet(nn.Module):
         Returns the receptive field of the TCN in number of samples
         """
         return self.tcn.receptive_field
+
+    def pad_signal_baseline(self, input):
+        # Original paper implementation (naplab/Conv-TasNet)
+        if input.dim() == 2:
+            input = input.unsqueeze(1)
+        nsample = input.size(2)
+        win = self.encoder_kernel_size
+        rest = win - (self.stride + nsample % win) % win
+        input = F.pad(input, (self.stride, rest + self.stride))
+        return input, rest
 
     def pad_signal(self, x):
         x = x.unsqueeze(1) if x.dim() == 2 else x
@@ -523,10 +539,12 @@ class ConvTasNet(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Input: [Batch, L] or [Batch, 1, L]
-        P = self.encoder_kernel_size - self.stride
         n = input.size(-1)
         # First we pad
-        padded_input, rest = self.pad_signal(input)
+        if self._baseline_mode:
+            padded_input, rest = self.pad_signal_baseline(input)
+        else:
+            padded_input, _ = self.pad_signal(input)
 
         enc_output_mixture = self.encoder(padded_input)
         # enc_output_mixture shape: [Batch, N, L']
@@ -548,13 +566,14 @@ class ConvTasNet(nn.Module):
         dec_output = self.decoder(masked_output)
         # dec_output shape: [Batch * n_src, 1, L]
 
-        # We remove extra
-        # See the paper implementation
-        output = dec_output[:, :, P : P + n].contiguous()
-        output = output.view(batch_size, n_src, -1)
-
+        if self._baseline_mode:
+            output = dec_output[:, :, self.stride : -(rest + self.stride)]
+        else:
+            P = self.encoder_kernel_size - self.stride
+            output = dec_output[:, :, P : P + n]
+            
         # output shape: [Batch, n_src, L]
-        return output
+        return output.contiguous().view(batch_size, n_src, -1)   # [Batch, n_src, L]
 
     def get_loggable_weights(self) -> Generator[tuple[str, torch.Tensor], None, None]:
         for name, param in self.encoder.get_loggable_weights():
