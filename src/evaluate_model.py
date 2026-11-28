@@ -102,7 +102,7 @@ def parse_args() -> argparse.Namespace:
             "first batch (default: %(default)s)."
         ),
     )
-    
+
     parser.add_argument(
         "--ckpt",
         type=str,
@@ -111,6 +111,23 @@ def parse_args() -> argparse.Namespace:
             "Number of random batches to export as audio, in addition to the "
             "first batch (default: %(default)s)."
         ),
+    )
+
+    parser.add_argument(
+        "--mini_librimix",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Number of random batches to export as audio, in addition to the "
+            "first batch (default: %(default)s)."
+        ),
+    )
+
+    parser.add_argument(
+        "--eval_path",
+        type=str,
+        default="evaluation.yaml",
+        help=("Yaml path to save eval metrics values"),
     )
 
     args = parser.parse_args()
@@ -146,7 +163,8 @@ def evaluate(
     dataset_size = nb_batches_to_evaluate
     print(f"Test set length: {dataset_size} batches")
 
-    sisdrs, sisnrs, sdrs, stois = (
+    sisdrs, sisnrs, sdrs, stois, maxes = (
+        torch.zeros(dataset_size),
         torch.zeros(dataset_size),
         torch.zeros(dataset_size),
         torch.zeros(dataset_size),
@@ -216,6 +234,8 @@ def evaluate(
         stois[i] = stoi.mean()
         print(f"Batch {i} - STOI: {stoi.mean()}")
 
+        maxes[i] = torch.max(est_targets.abs())
+
         if i in export_batches_index:
             audios[i] = {
                 "input": input.cpu(),
@@ -230,6 +250,7 @@ def evaluate(
     print(f"Average SI-SDR: {sisdrs.mean()}")
     print(f"Average SI-SNR: {sisnrs.mean()}")
     print(f"Average STOI: {stois.mean()}")
+    print(f"Average STOI: {maxes.mean()}")
     print(f"Average inference time per sample: {timings.mean()} ms")
 
     results = {
@@ -237,6 +258,8 @@ def evaluate(
         "average_sisdr": sisdrs.mean().item(),
         "average_sisnr": sisnrs.mean().item(),
         "average_stoi": stois.mean().item(),
+        "average_max": maxes.mean().item(),
+        "max_max": maxes.max().item(),
         f"average_inference_time_ms_{dataset_size}_batches": timings.mean().item(),
     }
 
@@ -249,7 +272,7 @@ def export_audios(audios: dict, config_name: str, conf: Conf) -> None:
     sample_rate = conf.data.sample_rate
 
     for i in audios.keys():
-        print(audios[i]["input"].shape)
+        # print(audios[i]["input"].shape)
         input = audios[i]["input"][0, :]
         target_1 = audios[i]["targets"][0, 0, :]
         target_2 = audios[i]["targets"][0, 1, :]
@@ -263,21 +286,21 @@ def export_audios(audios: dict, config_name: str, conf: Conf) -> None:
         ratio_1 = est_target_1.abs().amax() / target_1.abs().amax()
         ratio_2 = est_target_2.abs().amax() / target_2.abs().amax()
 
-        for name, sig in [
-            ("input", input),
-            ("target1", target_1),
-            ("est1", est_target_1),
-            ("ratio1", ratio_1),
-            ("target2", target_2),
-            ("est2", est_target_2),
-            ("ratio2", ratio_2),
-        ]:
-            print(
-                name,
-                sig.min().item(),
-                sig.max().item(),
-                sig.abs().max().item(),
-            )
+        # for name, sig in [
+        #     ("input", input),
+        #     ("target1", target_1),
+        #     ("est1", est_target_1),
+        #     ("ratio1", ratio_1),
+        #     ("target2", target_2),
+        #     ("est2", est_target_2),
+        #     ("ratio2", ratio_2),
+        # ]:
+        #     print(
+        #         name,
+        #         sig.min().item(),
+        #         sig.max().item(),
+        #         sig.abs().max().item(),
+        #     )
 
         for suffix, sig in [
             ("input", input),
@@ -301,7 +324,7 @@ def main() -> None:
     # The first config is used to build the (shared) test data loader.
     data_conf = load_conf(args.conf_paths[0])
     test_set = get_test_data_loaders(
-        conf=data_conf, evaluation_batch_size=args.batch_size, shuffle=False
+        conf=data_conf, evaluation_batch_size=args.batch_size, shuffle=False,
     )
 
     nb_batches = args.nb_batches
@@ -340,7 +363,7 @@ def main() -> None:
 
         export_audios(audios, config_name, conf)
 
-        path = os.path.join(conf.exp_dir, "evaluation.yaml")
+        path = os.path.join(conf.exp_dir, os.path.basename(args.eval_path))
         with open(path, "w") as f:
             yaml.dump(results, f)
 
