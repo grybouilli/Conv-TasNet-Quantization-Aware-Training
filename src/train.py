@@ -31,11 +31,22 @@ from model.convtasnet import ConvTasNet
 from utils.conf import Conf
 from utils.lightning_module import ConvTasNetLightningModule
 from utils.utils import construct_model, get_data_loaders, neg_sisdr
+import re
+from pathlib import Path
 
 accelerator = "gpu"
 devices = "auto"
 strategy = "auto"
 
+def next_version(path) -> str:
+    """Return the next unused 'version_N' name for folders inside `path`."""
+    pattern = re.compile(r"^version_(\d+)$")
+    used = [
+        int(m.group(1))
+        for p in Path(path).iterdir()
+        if p.is_dir() and (m := pattern.match(p.name))
+    ]
+    return f"version_{max(used) + 1 if used else 0}"
 
 class PIT_SISDR_L1_Loss(torch.nn.Module):
     def __init__(self, sisdr_ratio=0.9, l1_ratio=0.2):
@@ -109,7 +120,9 @@ def train(conf: Conf, resume_from: None | str = None):
 
     # Define callbacks
     callbacks = []
-    checkpoint_dir = os.path.join(exp_dir, "checkpoints/")
+
+    version_dir = next_version(os.path.join(exp_dir, "lightning_logs"))
+    checkpoint_dir = os.path.join(exp_dir, "checkpoints/", version_dir)
     checkpoint = ModelCheckpoint(
         checkpoint_dir, monitor="val_loss", mode="min", save_top_k=5, verbose=True
     )
